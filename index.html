@@ -1,13 +1,13 @@
 // This application provides a Daily Training Log structured around the RP Strength Hypertrophy methodology.
 // Features include a multi-tab navigation (Home, Training, Progress, Library, Nutrition), a bold dark/red aesthetic,
 // dynamic "B-Shift" scheduling, KPI tracking via Firestore, a rest timer, and Gemini TTS/Text-powered AI coaching.
-// This version includes CNS Readiness, HRV input, and Cardio/Recovery logging.
+// This version includes CNS Readiness, HRV input, and Cardio/Recovery logging, and a Recovery Trend Chart.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, collection, query, onSnapshot, orderBy, where, limit, getDocs } from 'firebase/firestore';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { getAuth, signInWithCustomToken, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { getFirestore, doc, setDoc, collection, query, onSnapshot, getDocs } from 'firebase/firestore';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend } from 'recharts';
 
 // --- GEMINI API CONFIGURATION ---
 const API_KEY = ""; // Key is provided by the Canvas environment at runtime
@@ -54,39 +54,38 @@ const WORKOUT_SCHEDULE = {
 
 // --- UTILITY FUNCTIONS ---
 const formatDate = (date) => date.toISOString().split('T')[0];
+const today = new Date();
+const currentDayOfWeek = today.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
 
 const getWorkoutForDate = (currentDate, allLogs) => {
     const sequence = [1, 2, 4, 5]; // Mon (1), Tue (2), Thu (4), Fri (5)
-    const currentDayKey = currentDate.getDay(); // 0=Sun, 1=Mon, ...
-
-    // Sun (0), Wed (3), Sat (6) are planned rest/cardio days
+    
+    // Check if the current date is a scheduled rest day (Sun: 0, Wed: 3, Sat: 6)
+    const currentDayKey = currentDate.getDay();
     if (currentDayKey === 0 || currentDayKey === 3 || currentDayKey === 6) return null; 
 
+    // Find the key of the next workout in the sequence based on the last completed log
+    let nextWorkoutKey = 1; // Default to Legs 1 (Monday)
+
     // Find the key of the last COMPLETED workout
-    let lastCompletedKey = null;
-    const loggedDates = Object.keys(allLogs).filter(date => allLogs[date].isComplete).sort().reverse();
-    
-    for (const date of loggedDates) {
-        const loggedWorkoutName = allLogs[date].name;
-        const key = sequence.find(k => WORKOUT_SCHEDULE[k]?.name === loggedWorkoutName);
-        if (key) {
-            lastCompletedKey = key;
-            break;
+    const completedLogs = Object.keys(allLogs)
+        .filter(date => allLogs[date].isComplete)
+        .sort((a, b) => new Date(b) - new Date(a)); 
+
+    if (completedLogs.length > 0) {
+        const lastCompletedLog = allLogs[completedLogs[0]];
+        const lastCompletedKey = sequence.find(k => WORKOUT_SCHEDULE[k]?.name === lastCompletedLog.name);
+        
+        if (lastCompletedKey !== undefined) {
+            const lastIndex = sequence.indexOf(lastCompletedKey);
+            const nextIndex = (lastIndex + 1) % sequence.length;
+            nextWorkoutKey = sequence[nextIndex];
         }
     }
-
-    // Default to Legs 1 if no logs exist
-    if (lastCompletedKey === null) {
-        return WORKOUT_SCHEDULE[1];
-    }
-
-    // "B-Shift" Logic: Next workout in the sequence
-    const lastIndex = sequence.indexOf(lastCompletedKey);
-    const nextIndex = (lastIndex + 1) % sequence.length;
-    const nextKey = sequence[nextIndex];
     
-    return WORKOUT_SCHEDULE[nextKey];
+    return WORKOUT_SCHEDULE[nextWorkoutKey];
 };
+
 
 // Helper function for muscle group icons (Mock)
 const getMuscleGroup = (name) => {
@@ -122,19 +121,22 @@ const pcmToWav = (pcmData, sampleRate = 24000, numChannels = 1) => {
     const buffer = new ArrayBuffer(44);
     const view = new DataView(buffer);
     
+    // RIFF header
     view.setUint32(0, 0x52494646, false); 
     view.setUint32(4, fileSize, true);
     view.setUint32(8, 0x57415645, false); 
     
+    // fmt sub-chunk
     view.setUint32(12, 0x666d7420, false); 
     view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
+    view.setUint16(20, 1, true); // PCM format
     view.setUint16(22, numChannels, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, byteRate, true);
     view.setUint16(32, blockAlign, true);
     view.setUint16(34, bitsPerSample, true);
     
+    // data sub-chunk
     view.setUint32(36, 0x64617461, false); 
     view.setUint32(40, dataSize, true);
     
@@ -158,6 +160,9 @@ const useFirebase = () => {
             const app = initializeApp(firebaseConfig);
             const firestore = getFirestore(app);
             const authentication = getAuth(app);
+            
+            // For debug logging
+            // setLogLevel('Debug');
 
             setDb(firestore);
             setAuth(authentication);
@@ -167,8 +172,7 @@ const useFirebase = () => {
                     if (initialAuthToken) {
                         await signInWithCustomToken(authentication, initialAuthToken);
                     } else {
-                        // signInAnonymously is fallback for local development if token is missing
-                        await getAuth().signInAnonymously(); 
+                        await signInAnonymously(authentication); 
                     }
                 } catch (error) {
                     console.error("Firebase Sign-in Failed:", error);
@@ -233,7 +237,27 @@ const useLogs = (db, userId, isAuthReady, logType = 'workout_logs') => {
 
 // Hook for Recovery Data (Now separated)
 const useRecoveryLogs = (db, userId, isAuthReady) => {
-    return useLogs(db, userId, isAuthReady, 'recovery_logs');
+    const { logs, saveLog } = useLogs(db, userId, isAuthReady, 'recovery_logs');
+    const [recoveryData, setRecoveryData] = useState({});
+
+    useEffect(() => {
+        // Transform the logs object into a chart-friendly array
+        const chartData = Object.keys(logs).map(date => {
+            const log = logs[date];
+            return {
+                name: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                Readiness: log.readiness || 5,
+                Soreness: log.soreness || 3,
+                Sleep: log.sleepHours || 7,
+                date: date
+            };
+        }).sort((a, b) => new Date(a.date) - new Date(b.date));
+        
+        setRecoveryData(chartData);
+
+    }, [logs]);
+
+    return { recoveryLogs: logs, saveRecoveryData: saveLog, recoveryChartData: recoveryData };
 };
 
 // Hook for Workout Logs
@@ -282,13 +306,14 @@ const useKPIs = (logs) => {
 
             if (log.exercises) {
                 log.exercises.forEach(exercise => {
-                    // Calculate sets planned based on the structure
-                    const plannedSets = exercise.setsData ? exercise.setsData.length : 0;
+                    // Calculate sets planned based on the structure (check if workout is defined in schedule)
+                    const plannedWorkout = Object.values(WORKOUT_SCHEDULE).find(w => w.name === log.name);
+                    const plannedSets = plannedWorkout ? plannedWorkout.exercises.find(e => e.id === exercise.id)?.sets || 0 : 0;
                     totalSetsPlanned += plannedSets;
 
                     if (exercise.setsData) {
                         exercise.setsData.forEach(set => {
-                            if (set.isDone) {
+                            if (set.isDone && set.weight > 0 && set.reps > 0) {
                                 const volume = set.weight * set.reps;
                                 totalVolume += volume;
                                 weeklyVolume[weekKey].volume += volume;
@@ -308,6 +333,8 @@ const useKPIs = (logs) => {
         });
         
         // Safety check for division by zero on consistency
+        // Note: For a true consistency score based on PLANNED sets, we should only sum totalSetsPlanned
+        // for days that were lift days. Since the log only saves on lift days, this is sufficient.
         const consistencyScore = totalSetsPlanned > 0 ? (totalSetsCompleted / totalSetsPlanned) * 100 : 0;
         // Overload ratio is based on completed sets
         const overloadRatio = totalSetsCompleted > 0 ? (setsWithNewMaxVolume / totalSetsCompleted) * 100 : 0;
@@ -334,8 +361,6 @@ const useKPIs = (logs) => {
     return { kpis, volumeData };
 };
 
-
-// --- AUDIO UTILITIES FOR TTS API (Provided in utility block) ---
 
 // --- GEMINI CRITIQUE COMPONENT ---
 const AICritiqueGenerator = ({ logData, logs }) => {
@@ -531,7 +556,7 @@ const ProgramBlockOverview = ({ cardColor }) => (
 const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, handleSetChange, inputColor, cardColor, buttonPrimary, logs, userId, timerSettings, setTimerSettings, isAuthReady, recoveryData, saveRecoveryData }) => {
     
     const dateString = formatDate(currentDate);
-    const logData = logs[dateString] || null;
+    const logsForDate = logs[dateString] || null;
     const isRestDay = !localLog;
     const recoveryDayKey = currentDate.getDay(); // 0=Sun, 3=Wed, 6=Sat
 
@@ -545,7 +570,7 @@ const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, han
     // Smart Prediction Feature
     const getPrediction = (exerciseId, setIndex) => {
         const prevSet = getPreviousSetData(exerciseId, setIndex);
-        if (!prevSet) return null;
+        if (!prevSet || prevSet.weight === 0) return null;
 
         const exercise = WORKOUT_SCHEDULE[localLog.id]?.exercises.find(ex => ex.id === exerciseId);
         if (!exercise) return null;
@@ -560,7 +585,8 @@ const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, han
             return `Target: ${lastReps + 1} reps at ${lastWeight} lb/kg`; // Double progression: increment reps
         } else {
             // Hit max reps, suggest increasing weight and resetting reps
-            const newWeight = Math.ceil(lastWeight * 1.025 / 2.5) * 2.5; // +2.5% adjusted to 2.5 unit step
+            // Round up to nearest 2.5 unit step (common plate jump)
+            const newWeight = Math.ceil((lastWeight * 1.025) / 2.5) * 2.5; 
             return `Target: ${minReps} reps at ${newWeight} lb/kg (+Weight)`;
         }
     };
@@ -610,7 +636,7 @@ const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, han
 
 
     const renderWorkoutLog = () => {
-        if (isRestDay) {
+        if (isRestDay || !localLog) {
             return (
                 <div className="space-y-6">
                     <div className={`p-6 rounded-xl shadow-lg ${cardColor} border border-gray-700`}>
@@ -657,6 +683,7 @@ const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, han
                                         <div className="w-1/2">
                                             <input
                                                 type="number"
+                                                step="2.5"
                                                 placeholder="Weight"
                                                 value={set.weight || ''}
                                                 onChange={(e) => handleSetChange(exercise.id, setIndex, 'weight', e.target.value)}
@@ -879,35 +906,59 @@ const AILoadoutPlanner = ({ kpis, cardColor }) => {
     }, [kpis]);
 
     return (
-        <div className={`p-5 rounded-xl shadow-xl ${cardColor} border-t-4 border-red-500 border border-gray-700 mt-6`}>
-            <h4 className="text-xl font-bold mb-3 text-red-400 flex items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0h6m-6 0v-5a2 2 0 012-2h2a2 2 0 012 2v5m-6 0h6" /></svg>
-                ✨ Next Phase Planner
-            </h4>
-            <button
-                onClick={generateAdvice}
-                disabled={loading}
-                className={`w-full py-2 px-4 rounded-lg font-bold text-white transition-all duration-300 ${loading ? 'bg-gray-500 cursor-not-allowed' : 'bg-pink-600 hover:bg-pink-700'}`}
-            >
-                {loading ? 'Analyzing Data...' : 'Get Next Phase Recommendation'}
-            </button>
-            {advice && (
-                <div className="mt-4 p-3 bg-gray-900 rounded-lg border border-pink-700">
-                    <p className="text-sm italic text-white">{advice}</p>
-                </div>
-            )}
-            {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+        <div className="space-y-6">
+            <div className={`p-5 rounded-xl shadow-xl ${cardColor} border-t-4 border-red-500 border border-gray-700 mt-6`}>
+                <h4 className="text-xl font-bold mb-3 text-red-400 flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0h6m-6 0v-5a2 2 0 012-2h2a2 2 0 012 2v5m-6 0h6" /></svg>
+                    ✨ Next Phase Planner
+                </h4>
+                <button
+                    onClick={generateAdvice}
+                    disabled={loading}
+                    className={`w-full py-2 px-4 rounded-lg font-bold text-white transition-all duration-300 ${loading ? 'bg-gray-500 cursor-not-allowed' : 'bg-pink-600 hover:bg-pink-700'}`}
+                >
+                    {loading ? 'Analyzing Data...' : 'Get Next Phase Recommendation'}
+                </button>
+                {advice && (
+                    <div className="mt-4 p-3 bg-gray-900 rounded-lg border border-pink-700">
+                        <p className="text-sm italic text-white">{advice}</p>
+                    </div>
+                )}
+                {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+            </div>
         </div>
     );
 };
 
-const ProgressDashboard = ({ kpis, volumeData, cardColor, userId }) => {
+// --- RECOVERY TREND CHART ---
+const RecoveryTrendChart = ({ recoveryChartData, cardColor }) => (
+    <div className={`p-5 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
+        <h4 className="text-xl font-bold mb-2 text-yellow-500">Recovery Trend (Soreness vs. Readiness)</h4>
+        <p className="text-sm text-gray-500 mb-3">Goal: Readiness (Red) must be higher than Soreness (Yellow).</p>
+        <div style={{ width: '100%', height: 250 }}>
+            <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={recoveryChartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                    <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                    <XAxis dataKey="name" stroke="#9ca3af" tick={{ fontSize: 10 }} />
+                    <YAxis yAxisId="left" stroke="#9ca3af" domain={[0, 10]} tick={{ fontSize: 10 }} />
+                    <Tooltip contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }} itemStyle={{ color: '#fca5a5' }}/>
+                    <Legend />
+                    <Line yAxisId="left" type="monotone" dataKey="Readiness" stroke="#ef4444" strokeWidth={2} name="Readiness (1-10)" />
+                    <Line yAxisId="left" type="monotone" dataKey="Soreness" stroke="#f59e0b" strokeWidth={2} name="Soreness (1-10)" />
+                </LineChart>
+            </ResponsiveContainer>
+        </div>
+    </div>
+);
+
+
+const ProgressDashboard = ({ kpis, volumeData, recoveryChartData, cardColor, userId }) => {
     
     // Determine the current weekly volume trend for the home screen (last data point)
     const latestVolume = volumeData.length > 0 ? volumeData[volumeData.length - 1].Volume : 0;
     const previousVolume = volumeData.length > 1 ? volumeData[volumeData.length - 2].Volume : 0;
     const volumeChange = latestVolume - previousVolume;
-    const volumeTrend = volumeChange > 0 ? `+${volumeChange.toLocaleString()}` : volumeChange.toLocaleString();
+    const volumeTrend = volumeChange > 0 ? `+${(volumeChange/1000).toFixed(1)}K` : `${(volumeChange/1000).toFixed(1)}K`;
     const trendColor = volumeChange > 0 ? 'text-green-400' : 'text-red-400';
 
     return (
@@ -922,6 +973,7 @@ const ProgressDashboard = ({ kpis, volumeData, cardColor, userId }) => {
                     <p className="text-3xl font-extrabold text-green-500">{kpis.consistencyScore}%</p>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">Sets Completed vs. Sets Planned across all logs.</p>
+                <p className="text-xs text-gray-500 mt-1">Your User ID: {userId}</p>
             </div>
 
             {/* KPI Card Grid */}
@@ -949,11 +1001,14 @@ const ProgressDashboard = ({ kpis, volumeData, cardColor, userId }) => {
                 </div>
             </div>
 
+            {/* Recovery Trend Chart */}
+            <RecoveryTrendChart recoveryChartData={recoveryChartData} cardColor={cardColor} />
+
             {/* Volume Trend Chart */}
             <div className={`p-5 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
                 <h4 className="text-xl font-bold mb-2">Weekly Volume Trend</h4>
                 <p className={`text-sm font-semibold mb-3 ${trendColor}`}>
-                    Weekly Volume Change: {(volumeChange/1000).toFixed(1)}K (from last tracked week)
+                    Weekly Volume Change: {volumeTrend} (from last tracked week)
                 </p>
                 <div style={{ width: '100%', height: 250 }}>
                     <ResponsiveContainer width="100%" height="100%">
@@ -1077,7 +1132,7 @@ const HomeDashboard = ({ localLog, currentDate, kpis, volumeData, cardColor, rec
                             onChange={(e) => handleRecoveryChange('readiness', e.target.value)}
                             className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer range-lg accent-red-600"
                         />
-                        <p className="text-sm text-center text-red-400 font-semibold">Readiness Score: {recoveryData.readiness || 5}</p>
+                        <p className="text-sm text-center text-red-400 font-semibold">Score: {recoveryData.readiness || 5}</p>
                     </div>
 
                     {/* Soreness Slider */}
@@ -1091,7 +1146,7 @@ const HomeDashboard = ({ localLog, currentDate, kpis, volumeData, cardColor, rec
                             onChange={(e) => handleRecoveryChange('soreness', e.target.value)}
                             className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer range-lg accent-red-600"
                         />
-                        <p className="text-sm text-center text-red-400 font-semibold">Soreness Level: {recoveryData.soreness || 3}</p>
+                        <p className="text-sm text-center text-red-400 font-semibold">Level: {recoveryData.soreness || 3}</p>
                     </div>
                 </div>
             </div>
@@ -1241,12 +1296,12 @@ const AIFormCueGenerator = ({ cardColor }) => {
     }, [selectedExercise]);
 
     // Gather all unique exercises for the selector
-    const allExercises = [
+    const allExercises = useMemo(() => [
         ...WORKOUT_SCHEDULE[1].exercises, 
         ...WORKOUT_SCHEDULE[2].exercises,
         ...WORKOUT_SCHEDULE[4].exercises,
         ...WORKOUT_SCHEDULE[5].exercises
-    ];
+    ], []);
     const uniqueExercises = [...new Map(allExercises.map(item => [item.name, item])).values()];
 
 
@@ -1403,7 +1458,7 @@ const SplashScreen = ({ theme, onStart }) => {
 const App = () => {
     const { db, userId, isAuthReady } = useFirebase();
     const { logs, saveLog } = useWorkoutLogs(db, userId, isAuthReady);
-    const { logs: recoveryLogs, saveLog: saveRecoveryData } = useRecoveryLogs(db, userId, isAuthReady);
+    const { recoveryLogs, saveRecoveryData, recoveryChartData } = useRecoveryLogs(db, userId, isAuthReady);
     const { kpis, volumeData } = useKPIs(logs);
 
     const [currentDate, setCurrentDate] = useState(new Date());
@@ -1461,6 +1516,7 @@ const App = () => {
             setLocalLog(initialLog);
         } else {
             setLocalLog(null);
+            setPrevLogData(null); // Clear previous data if it's a rest day
         }
     }, [currentWorkout, workoutLogData, logs]);
 
@@ -1546,7 +1602,7 @@ const App = () => {
                     />
                 );
             case 'progress':
-                return <ProgressDashboard kpis={kpis} volumeData={volumeData} cardColor={cardColor} userId={userId} />;
+                return <ProgressDashboard kpis={kpis} volumeData={volumeData} recoveryChartData={recoveryChartData} cardColor={cardColor} userId={userId} />;
             case 'library':
                 return <AIFormCueGenerator cardColor={cardColor} />;
             case 'nutrition':
@@ -1602,7 +1658,7 @@ const App = () => {
                 <div className="max-w-4xl mx-auto flex justify-around">
                     {[
                         { id: 'home', label: 'Home', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg> },
-                        { id: 'training', label: 'Training', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l-2 2M15 19V6l2 2m-6-4l-4 4m8-4l4 4" /></svg> },
+                        { id: 'training', label: 'Training', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l-2 2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg> },
                         { id: 'progress', label: 'Progress', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M18 10a8 8 0 10-16 0 8 8 0 0016 0z" /></svg> },
                         { id: 'library', label: 'Library', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13a4.75 4.75 0 00-4.75 4.75v3.25l-2.25 2.25M12 6.253a4.75 4.75 0 014.75 4.75v3.25l2.25 2.25m-11.25 0h11.25" /></svg> },
                         { id: 'nutrition', label: 'Nutrition', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 17l-5-5m0 0l5-5m-5 5h14" /></svg> },
