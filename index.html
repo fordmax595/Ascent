@@ -1,0 +1,1210 @@
+// This application provides a Daily Training Log structured around the RP Strength Hypertrophy methodology.
+// Features include a multi-tab navigation (Home, Training, Progress, Library), a bold dark/red aesthetic,
+// dynamic "B-Shift" scheduling, KPI tracking via Firestore, a rest timer, and a Gemini TTS-powered AI Coach Critique.
+
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, setDoc, collection, query, onSnapshot, getDocs } from 'firebase/firestore';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+// --- GEMINI API CONFIGURATION ---
+const API_KEY = ""; // Key is provided by the Canvas environment at runtime
+const TTS_MODEL = "gemini-2.5-flash-preview-tts";
+const TEXT_MODEL = "gemini-2.5-flash-preview-05-20"; 
+const API_URL_TTS = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${API_KEY}`;
+const API_URL_TEXT = `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent?key=${API_KEY}`;
+
+
+// --- CONFIGURATION AND INITIALIZATION ---
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
+
+// 1. App Data Structure (The 4-day Metabolic Hypertrophy Split)
+const WORKOUT_SCHEDULE = {
+    1: { name: 'Legs 1 (Pump Focus)', exercises: [
+        { id: 101, name: 'Hack Squat or Leg Press', sets: 3, repRange: '10-12', rest: 90, technique: 'Density: Minimize lockout.' },
+        { id: 102, name: 'Romanian Deadlift (RDL)', sets: 3, repRange: '8-10', rest: 90, technique: 'Maintain mechanical tension (slow eccentric).' },
+        { id: 103, name: 'Seated Leg Curl', sets: 3, repRange: '12-15', rest: 60, technique: 'Drop Set on final set.' },
+        { id: 104, name: 'Standing or Seated Calf Raises', sets: 3, repRange: '15-20', rest: 45, technique: 'Maximize peak contraction and burn.' },
+    ]},
+    2: { name: 'Push (Volume/Pump)', exercises: [
+        { id: 201, name: 'Machine Chest Press or Pec Deck', sets: 3, repRange: '12-15', rest: 75, technique: 'Myo-Rep Set on the final set.' },
+        { id: 202, name: 'Machine Shoulder Press', sets: 3, repRange: '10-12', rest: 75, technique: 'Use machine for constant tension.' },
+        { id: 203, name: 'Dumbbell or Machine Flyes', sets: 3, repRange: '15-20', rest: 45, technique: 'Drop Set on the final set.' },
+        { id: 204, name: 'Cable Triceps Pushdown', sets: 3, repRange: '15-20', rest: 45, technique: '3s eccentric, short rest for occlusion.' },
+    ]},
+    4: { name: 'Pull (Max Pump/Density)', exercises: [
+        { id: 401, name: 'Wide Grip Lat Pulldown', sets: 3, repRange: '12-15', rest: 45, technique: 'Superset with Seated Cable Row.' },
+        { id: 402, name: 'Seated Cable Row', sets: 3, repRange: '12-15', rest: 45, technique: 'Superset with Lat Pulldown.' },
+        { id: 403, name: 'Cable Bicep Curl', sets: 3, repRange: '15-20', rest: 45, technique: 'Drop Set on the final set.' },
+        { id: 404, name: 'Face Pull', sets: 2, repRange: '20-25', rest: 45, technique: 'High reps for localized pump.' },
+    ]},
+    5: { name: 'Legs 2 (Max Metabolic Stress)', exercises: [
+        { id: 501, name: 'Leg Extension', sets: 4, repRange: '15-20', rest: 45, technique: 'Pure metabolic overload. Drop Set on final set.' },
+        { id: 502, name: 'Seated Leg Curl', sets: 4, repRange: '15-20', rest: 45, technique: 'Max density. Drop Set on final set.' },
+        { id: 503, name: 'Walking Lunges (or DB Reverse Lunges)', sets: 3, repRange: '12 steps/leg', rest: 75, technique: 'Higher volume and density.' },
+        { id: 504, name: 'Standing or Seated Calf Raises', sets: 3, repRange: '15-20', rest: 45, technique: 'Maximize peak contraction and burn.' },
+    ]},
+};
+
+const DOW_MAPPING = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat' };
+
+// --- UTILITY FUNCTIONS ---
+const formatDate = (date) => date.toISOString().split('T')[0];
+
+const getWorkoutForDate = (currentDate, allLogs) => {
+    const dayOfWeek = currentDate.getDay(); 
+    const sequence = [1, 2, 4, 5]; 
+
+    if (dayOfWeek === 0 || dayOfWeek === 3 || dayOfWeek === 6) return null; // Sun, Wed, Sat are planned rest/cardio days
+
+    let lastCompletedKey = null;
+    const loggedDates = Object.keys(allLogs).sort().reverse();
+    
+    // Find the key of the last COMPLETED workout
+    for (const date of loggedDates) {
+        if (allLogs[date].isComplete) {
+            const loggedWorkoutName = allLogs[date].name;
+            const key = sequence.find(k => WORKOUT_SCHEDULE[k].name === loggedWorkoutName);
+            if (key) {
+                lastCompletedKey = key;
+                break;
+            }
+        }
+    }
+
+    // Default to Legs 1 if no logs exist
+    if (lastCompletedKey === null) {
+        return WORKOUT_SCHEDULE[1];
+    }
+
+    // "B-Shift" Logic: Next workout in the sequence
+    const lastIndex = sequence.indexOf(lastCompletedKey);
+    const nextIndex = (lastIndex + 1) % sequence.length;
+    const nextKey = sequence[nextIndex];
+    
+    return WORKOUT_SCHEDULE[nextKey];
+};
+
+// --- AUDIO UTILITIES FOR TTS API ---
+const base64ToArrayBuffer = (base64) => {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+};
+
+const pcmToWav = (pcmData, sampleRate = 24000, numChannels = 1) => {
+    const pcm16 = new Int16Array(pcmData);
+    const bitsPerSample = 16;
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = pcm16.byteLength;
+    const fileSize = 36 + dataSize;
+    
+    const buffer = new ArrayBuffer(44);
+    const view = new DataView(buffer);
+    
+    view.setUint32(0, 0x52494646, false); 
+    view.setUint32(4, fileSize, true);
+    view.setUint32(8, 0x57415645, false); 
+    
+    view.setUint32(12, 0x666d7420, false); 
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    
+    view.setUint32(36, 0x64617461, false); 
+    view.setUint32(40, dataSize, true);
+    
+    const wavBuffer = new Uint8Array(fileSize + 8);
+    wavBuffer.set(new Uint8Array(buffer), 0);
+    wavBuffer.set(new Uint8Array(pcm16.buffer), 44);
+    
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+};
+
+
+// --- FIREBASE AND AUTH HOOKS ---
+const useFirebase = () => {
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const authentication = getAuth(app);
+
+            setDb(firestore);
+            setAuth(authentication);
+
+            const signIn = async () => {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(authentication, initialAuthToken);
+                    } else {
+                        await getAuth().signInAnonymously();
+                    }
+                } catch (error) {
+                    console.error("Firebase Sign-in Failed:", error);
+                }
+            };
+
+            const unsubscribe = onAuthStateChanged(authentication, (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                } else {
+                    setUserId(null); 
+                }
+                setIsAuthReady(true);
+            });
+
+            signIn();
+            return () => unsubscribe();
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+            setIsAuthReady(true);
+        }
+    }, []);
+
+    return { db, auth, userId, isAuthReady };
+};
+
+const useLogs = (db, userId, isAuthReady) => {
+    const [logs, setLogs] = useState({});
+
+    useEffect(() => {
+        if (!db || !userId || !isAuthReady) return;
+
+        const logsCollectionPath = `artifacts/${appId}/users/${userId}/workout_logs`;
+        const logsRef = collection(db, logsCollectionPath);
+        const q = query(logsRef);
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const newLogs = {};
+            snapshot.forEach(doc => {
+                newLogs[doc.id] = { ...doc.data(), id: doc.id };
+            });
+            setLogs(newLogs);
+        }, (error) => {
+            console.error("Error fetching logs:", error);
+        });
+
+        return () => unsubscribe();
+    }, [db, userId, isAuthReady]);
+
+    const saveLog = useCallback(async (dateString, logData) => {
+        if (!db || !userId) return;
+        try {
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/workout_logs`, dateString);
+            await setDoc(docRef, logData, { merge: true });
+        } catch (error) {
+            console.error("Error saving log:", error);
+        }
+    }, [db, userId]);
+
+    return { logs, saveLog };
+};
+
+// --- KPI CALCULATIONS ---
+const useKPIs = (logs) => {
+    const [kpis, setKpis] = useState({
+        totalVolume: 0,
+        consistencyScore: 0,
+        overloadRatio: 0,
+        totalSetsCompleted: 0
+    });
+
+    const [volumeData, setVolumeData] = useState([]);
+
+    useEffect(() => {
+        if (Object.keys(logs).length === 0) {
+            setKpis({ totalVolume: 0, consistencyScore: 0, overloadRatio: 0, totalSetsCompleted: 0 });
+            setVolumeData([]);
+            return;
+        }
+
+        let totalVolume = 0;
+        let totalSetsPlanned = 0;
+        let totalSetsCompleted = 0;
+        let setsWithMaxVolume = 0;
+        const maxVolumeByExercise = {}; 
+        const weeklyVolume = {};
+
+        const sortedDates = Object.keys(logs).sort((a, b) => new Date(a) - new Date(b));
+
+        sortedDates.forEach(date => {
+            const log = logs[date];
+            const dateObj = new Date(date);
+            // Get week number (simple approximation)
+            const weekStart = new Date(dateObj.setDate(dateObj.getDate() - dateObj.getDay()));
+            const weekKey = formatDate(weekStart);
+
+            if (!weeklyVolume[weekKey]) {
+                weeklyVolume[weekKey] = { volume: 0, date: weekKey };
+            }
+
+            if (log.exercises) {
+                log.exercises.forEach(exercise => {
+                    const exerciseId = exercise.id;
+                    totalSetsPlanned += exercise.sets;
+
+                    if (exercise.setsData) {
+                        exercise.setsData.forEach(set => {
+                            if (set.isDone) {
+                                const volume = set.weight * set.reps;
+                                totalVolume += volume;
+                                weeklyVolume[weekKey].volume += volume;
+                                totalSetsCompleted++;
+                                
+                                // Check for Progressive Overload (New Max Volume)
+                                if (volume > (maxVolumeByExercise[exerciseId] || 0)) {
+                                    maxVolumeByExercise[exerciseId] = volume; 
+                                    setsWithMaxVolume++;
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        
+        const overloadRatio = totalSetsCompleted > 0 ? (setsWithMaxVolume / totalSetsCompleted) * 100 : 0;
+        const consistencyScore = totalSetsPlanned > 0 ? (totalSetsCompleted / totalSetsPlanned) * 100 : 0;
+
+        setKpis({
+            totalVolume: Math.round(totalVolume), 
+            consistencyScore: Math.round(consistencyScore), 
+            overloadRatio: Math.round(overloadRatio), 
+            totalSetsCompleted: totalSetsCompleted
+        });
+        
+        // Format for Chart
+        const chartData = Object.keys(weeklyVolume).map(key => ({
+            name: new Date(key).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            Volume: Math.round(weeklyVolume[key].volume),
+            date: key // Keep original date key for sorting
+        })).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        setVolumeData(chartData);
+
+    }, [logs]);
+
+    return { kpis, volumeData };
+};
+
+
+// --- GEMINI CRITIQUE COMPONENT ---
+const AICritiqueGenerator = ({ logData, logs }) => {
+    const [loading, setLoading] = useState(false);
+    const [audio, setAudio] = useState(null);
+    const [error, setError] = useState(null);
+
+    const generateCritique = useCallback(async () => {
+        if (!logData || !logData.isComplete) {
+            setError("Please complete all sets to receive an AI Critique.");
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        setAudio(null);
+
+        // 1. Prepare Data for LLM Prompt
+        const dataForPrompt = logData.exercises.map(ex => {
+            const sets = ex.setsData.map(s => `${s.weight}kg/lb x ${s.reps} reps`).join(', ');
+            return {
+                exercise: ex.name,
+                sets: ex.sets,
+                repRange: ex.repRange,
+                loggedPerformance: sets
+            };
+        });
+
+        const userQuery = `Review the following completed workout for the ${logData.name} session. The goal is metabolic hypertrophy via double progression (increase reps within the range, then increase weight). The sets property indicates the number of sets completed. The repRange indicates the goal range (e.g., 12-15). The loggedPerformance shows the actual weight and reps achieved for each set. Provide a very short (1-2 sentence) motivational summary of the performance, and then provide ONE specific, actionable progression goal for the user's next session (e.g., "On the Hack Squat, aim for 11 reps on Set 3," or "Increase the weight by 2.5kg/5lb on the Leg Press next time."). The critique must be concise and use a firm, motivational tone. Data: ${JSON.stringify(dataForPrompt)}`;
+
+        const systemPrompt = "Act as a highly specialized hypertrophy coach and training partner for a highly busy athlete. Your response must be extremely brief, actionable, and focus entirely on double progression for the next workout. Speak in a firm, direct tone.";
+
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            config: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: "Kore" } 
+                    }
+                }
+            },
+        };
+
+        try {
+            const response = await fetch(API_URL_TTS, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`TTS API request failed with status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            const part = result.candidates?.[0]?.content?.parts?.[0];
+            const audioData = part?.inlineData?.data;
+            
+            if (audioData) {
+                const pcmBuffer = base64ToArrayBuffer(audioData);
+                const wavBlob = pcmToWav(pcmBuffer);
+                const audioUrl = URL.createObjectURL(wavBlob);
+                setAudio(audioUrl);
+                
+                new Audio(audioUrl).play().catch(e => console.error("Audio playback failed (usually related to browser restrictions):", e));
+
+            } else {
+                const fallbackText = result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || "Analysis complete, but failed to generate audio.";
+                setError(`Audio generation failed. Text: ${fallbackText.substring(0, 100)}...`);
+            }
+
+        } catch (err) {
+            console.error("Gemini API Error:", err);
+            setError(`Failed to connect to the AI Coach. Please check console for details.`);
+        } finally {
+            setLoading(false);
+        }
+    }, [logData]);
+
+    return (
+        <div className="mt-4 p-4 rounded-xl shadow-lg bg-red-900 bg-opacity-30 border border-red-800">
+            <button
+                onClick={generateCritique}
+                disabled={loading || !logData || !logData.isComplete}
+                className={`w-full py-3 px-4 rounded-xl font-bold text-white transition-all duration-300 transform active:scale-95 flex items-center justify-center space-x-2 ${
+                    loading ? 'bg-red-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'
+                }`}
+            >
+                {loading && (
+                    <svg className="animate-spin h-5 w-5 mr-3 text-white" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeDasharray="80" strokeDashoffset="40"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                )}
+                <span className="text-lg">
+                    ✨ {loading ? 'Analyzing Performance...' : 'Get AI Coach Critique (Audio)'}
+                </span>
+            </button>
+            {error && <p className="text-red-400 text-sm mt-3 text-center">{error}</p>}
+            {audio && (
+                <p className="text-green-400 text-sm mt-3 text-center">
+                    Critique generated! Playing audio now... Check browser console if audio doesn't play.
+                </p>
+            )}
+        </div>
+    );
+};
+
+
+// --- TIMER COMPONENT ---
+const RestTimer = ({ initialTime, isRunning, onToggle, isTicking }) => {
+    const [time, setTime] = useState(initialTime);
+
+    useEffect(() => {
+        setTime(initialTime);
+    }, [initialTime]);
+
+    useEffect(() => {
+        let timer = null;
+        if (isRunning && time > 0) {
+            timer = setInterval(() => {
+                setTime(prevTime => prevTime - 1);
+            }, 1000);
+        } else if (time === 0 && isRunning) {
+            const playSound = () => { console.log('Timer finished sound!'); };
+            playSound();
+            onToggle(false);
+            setTime(initialTime);
+        }
+        return () => clearInterval(timer);
+    }, [isRunning, time, initialTime, onToggle]);
+
+    const minutes = Math.floor(time / 60);
+    const seconds = time % 60;
+
+    const buttonClass = isRunning 
+        ? "bg-red-800 hover:bg-red-900 active:bg-red-900 text-white shadow-lg border border-red-600" 
+        : "bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-white shadow-lg border border-gray-600";
+
+    return (
+        <div className={`p-4 rounded-xl ${isTicking ? 'bg-opacity-90 shadow-2xl bg-gray-900' : 'bg-opacity-60'} transition-all duration-300`}>
+            <div className="text-4xl font-extrabold mb-3 text-center text-red-400 transition-colors duration-300">
+                {String(minutes).padStart(2, '0')}:{String(seconds).padStart(2, '0')}
+            </div>
+            <button
+                onClick={() => onToggle(!isRunning)}
+                className={`w-full py-2 px-4 font-bold rounded-lg transition-all duration-300 transform active:scale-95 ${buttonClass}`}
+            >
+                {isRunning ? 'STOP / RESET' : `START ${initialTime}s REST`}
+            </button>
+        </div>
+    );
+};
+
+// --- CORE RENDER COMPONENTS ---
+
+const ProgramBlockOverview = ({ cardColor }) => (
+    <div className="space-y-6">
+        <h4 className="text-2xl font-bold text-red-400 border-b border-gray-700 pb-2">6-Week Metabolic Phase Overview</h4>
+        <p className="text-sm text-gray-400 italic">This plan maximizes Hypertrophy via Metabolic Stress (Pump Focus).</p>
+        
+        {Object.entries(WORKOUT_SCHEDULE).map(([key, workout]) => {
+            const dayMap = { 1: 'MON (LIFT)', 2: 'TUE (LIFT)', 4: 'THU (LIFT)', 5: 'FRI (LIFT)' };
+            const dayKey = parseInt(key);
+
+            return (
+                <div key={key} className={`p-4 rounded-xl ${cardColor} border border-gray-700 shadow-md`}>
+                    <h5 className="text-lg font-extrabold text-red-400">{dayMap[dayKey] || `Day ${dayKey}`}</h5>
+                    <p className="text-sm text-white font-semibold mt-1">{workout.name}</p>
+                    <ul className="text-xs text-gray-400 list-disc ml-4 mt-2 space-y-1">
+                        {workout.exercises.slice(0, 3).map((ex, i) => (
+                            <li key={i}>{ex.name} ({ex.repRange}) - {ex.rest}s Rest</li>
+                        ))}
+                        <li>...and 1 more exercise.</li>
+                    </ul>
+                </div>
+            );
+        })}
+        
+        <div className={`p-4 rounded-xl ${cardColor} border border-gray-700 shadow-md`}>
+            <h5 className="text-lg font-extrabold text-yellow-500">Deload (Week 5)</h5>
+            <p className="text-sm text-gray-400 mt-1">Reduce Volume by 50% | Target RPE 5-6 (Mandatory for recovery).</p>
+        </div>
+    </div>
+);
+
+
+const TrainingProgram = ({ localLog, prevLogData, currentDate, navigateDate, handleSetChange, inputColor, cardColor, buttonPrimary, logs, userId, timerSettings, setTimerSettings, isAuthReady }) => {
+    
+    const dateString = formatDate(currentDate);
+    const logData = logs[dateString] || null;
+
+    const getPreviousSetData = (exerciseId, setIndex) => {
+        if (!prevLogData) return null;
+        const prevEx = prevLogData.exercises.find(ex => ex.id === exerciseId);
+        if (!prevEx || !prevEx.setsData[setIndex]) return null;
+        return prevEx.setsData[setIndex];
+    };
+
+    const renderWorkoutLog = () => {
+        if (!localLog) {
+            const todayName = currentDate.toLocaleDateString('en-US', { weekday: 'long' });
+            return (
+                <div className={`p-6 rounded-xl shadow-lg ${cardColor} mt-4 border border-gray-700`}>
+                    <p className="text-center text-xl font-semibold text-red-400">
+                        {todayName} is a Planned Rest Day!
+                    </p>
+                    <p className="text-center mt-2 text-gray-500">
+                        Focus on recovery (HIIT/LISS/Passive Rest) or BJJ skill work.
+                    </p>
+                    <p className="text-xs text-center mt-4 text-gray-600">
+                        Schedule adheres to B-Shift (next available workout).
+                    </p>
+                </div>
+            );
+        }
+
+        return (
+            <div className="space-y-6">
+                <div className={`p-5 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
+                    <h3 className="text-2xl font-extrabold text-red-400 mb-2">
+                        {localLog.name}
+                    </h3>
+                    <p className={`text-sm font-medium ${localLog.isComplete ? 'text-green-500' : 'text-yellow-500'}`}>
+                        Status: {localLog.isComplete ? 'Completed' : 'In Progress'}
+                    </p>
+                </div>
+                
+                <AICritiqueGenerator 
+                    logData={localLog} 
+                    logs={logs}
+                />
+
+                {localLog.exercises.map(exercise => (
+                    <div key={exercise.id} className={`p-5 rounded-xl shadow-lg ${cardColor} border border-gray-700`}>
+                        <h4 className="text-xl font-bold mb-1">{exercise.name}</h4>
+                        <p className="text-sm text-gray-500 mb-3 italic">
+                            {exercise.sets} sets | Reps: {exercise.repRange} | Rest: {exercise.rest}s | Technique: {exercise.technique}
+                        </p>
+                        
+                        {exercise.setsData.map((set, setIndex) => {
+                            const prevSet = getPreviousSetData(exercise.id, setIndex);
+                            return (
+                                <div key={setIndex} className="flex flex-col sm:flex-row items-start sm:items-center space-y-2 sm:space-y-0 sm:space-x-3 mb-2 p-3 rounded-lg hover:bg-gray-700 transition-colors duration-200 border-b border-gray-700 last:border-b-0">
+                                    <span className="font-semibold w-full sm:w-16 flex-shrink-0">Set {set.set}:</span>
+                                    
+                                    <div className="flex-1 w-full flex space-x-2">
+                                        {/* Weight Input */}
+                                        <div className="w-1/2">
+                                            <input
+                                                type="number"
+                                                placeholder="Weight"
+                                                value={set.weight || ''}
+                                                onChange={(e) => handleSetChange(exercise.id, setIndex, 'weight', e.target.value)}
+                                                className={`w-full p-2 rounded-lg text-sm transition-colors ${inputColor}`}
+                                            />
+                                            {prevSet && <p className="text-xs text-gray-400 mt-1">Last: {prevSet.weight} {prevSet.reps}x</p>}
+                                        </div>
+                                        {/* Reps Input */}
+                                        <div className="w-1/2">
+                                            <input
+                                                type="number"
+                                                placeholder="Reps"
+                                                value={set.reps || ''}
+                                                onChange={(e) => handleSetChange(exercise.id, setIndex, 'reps', e.target.value)}
+                                                className={`w-full p-2 rounded-lg text-sm transition-colors ${inputColor}`}
+                                            />
+                                        </div>
+                                    </div>
+                                    
+                                    {/* Completion Checkbox */}
+                                    <div className="flex items-center justify-end w-full sm:w-12 flex-shrink-0">
+                                        <input
+                                            type="checkbox"
+                                            checked={set.isDone}
+                                            onChange={(e) => handleSetChange(exercise.id, setIndex, 'isDone', e.target.checked)}
+                                            className="h-6 w-6 text-red-600 rounded border-gray-300 focus:ring-red-500"
+                                        />
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                ))}
+            </div>
+        );
+    };
+
+    return (
+        <div className="space-y-8">
+            {/* Date Navigation and Timer */}
+            <div className="flex flex-col sm:flex-row justify-between items-center mb-8 space-y-4 sm:space-y-0">
+                {/* Date Picker */}
+                <div className="flex items-center space-x-3 w-full sm:w-auto justify-center sm:justify-start">
+                    <button
+                        onClick={() => navigateDate(-1)}
+                        className={`p-2 rounded-full ${buttonPrimary} transition-transform transform active:scale-95`}
+                        title="Previous Day"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                    </button>
+                    <span className="text-xl font-bold w-32 text-center">
+                        {currentDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' })}
+                    </span>
+                    <button
+                        onClick={() => navigateDate(1)}
+                        className={`p-2 rounded-full ${buttonPrimary} transition-transform transform active:scale-95`}
+                        title="Next Day"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                    </button>
+                </div>
+
+                {/* Rest Timer Buttons */}
+                <div className="flex space-x-4 w-full sm:w-auto justify-center sm:justify-end">
+                    <button 
+                        onClick={() => setTimerSettings({ isRunning: true, initialTime: 90 })}
+                        className={`py-2 px-4 rounded-lg font-semibold transition-colors duration-300 bg-red-600 hover:bg-red-700 text-white transform active:scale-95 border border-red-400`}
+                    >
+                        90s Rest
+                    </button>
+                    <button 
+                        onClick={() => setTimerSettings({ isRunning: true, initialTime: 120 })}
+                        className={`py-2 px-4 rounded-lg font-semibold transition-colors duration-300 bg-red-600 hover:bg-red-700 text-white transform active:scale-95 border border-red-400`}
+                    >
+                        120s Rest
+                    </button>
+                </div>
+            </div>
+
+            {/* Timer Display */}
+            {timerSettings.isRunning && (
+                <div className="mb-6">
+                    <RestTimer 
+                        initialTime={timerSettings.initialTime} 
+                        isRunning={timerSettings.isRunning} 
+                        onToggle={(newState) => setTimerSettings(prev => ({ ...prev, isRunning: newState }))}
+                        isTicking={true}
+                    />
+                </div>
+            )}
+            
+            <h3 className="text-3xl font-extrabold text-red-400 mb-6 border-b border-gray-700 pb-3">Daily Workout Log</h3>
+            
+            {/* Workout Rendering */}
+            {renderWorkoutLog()}
+            
+            {/* Program Overview Added */}
+            <div className="mt-10">
+                <ProgramBlockOverview cardColor={cardColor} />
+            </div>
+        </div>
+    );
+};
+
+// --- AI PROGRAM PLANNER ---
+
+const AILoadoutPlanner = ({ kpis, cardColor }) => {
+    const [advice, setAdvice] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+
+    const generateAdvice = useCallback(async () => {
+        setLoading(true);
+        setAdvice('');
+        setError(null);
+
+        const prompt = `Based on the following 6-week hypertrophy training key performance indicators (KPIs), provide a single, concise recommendation for the next training phase: Should the athlete deload, stick with the current block, or progress to a new block? Focus on metabolic stress (pump) as the goal.
+        KPI Data:
+        - Consistency Score (Sets Completed): ${kpis.consistencyScore}%
+        - Progressive Overload Ratio (Sets hitting new max volume): ${kpis.overloadRatio}%
+        - Total Volume Lifted (approx. lifetime): ${kpis.totalVolume.toLocaleString()}
+        
+        Recommendation should be 2-3 sentences max and address both consistency and overload. Start with: "Coach says: "`;
+
+        const systemPrompt = "Act as a specialized hypertrophy periodization coach. Analyze the KPI data provided. If Consistency is below 70% or Overload is below 10%, recommend a deload or adherence focus. If both are high (above 80% and 15% respectively), recommend progression or a volume increase. Be concise and authoritative.";
+
+        const payload = {
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+        };
+
+        try {
+            const response = await fetch(API_URL_TEXT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text || "Failed to retrieve analysis.";
+            setAdvice(generatedText);
+
+        } catch (err) {
+            console.error("Gemini Planner API Error:", err);
+            setError("Failed to generate program advice.");
+        } finally {
+            setLoading(false);
+        }
+    }, [kpis]);
+
+    return (
+        <div className={`p-5 rounded-xl shadow-xl ${cardColor} border-t-4 border-red-500 border border-gray-700 mt-6`}>
+            <h4 className="text-xl font-bold mb-3 text-red-400 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0h6m-6 0v-5a2 2 0 012-2h2a2 2 0 012 2v5m-6 0h6" /></svg>
+                ✨ Next Phase Planner
+            </h4>
+            <button
+                onClick={generateAdvice}
+                disabled={loading}
+                className={`w-full py-2 px-4 rounded-lg font-bold text-white transition-all duration-300 ${loading ? 'bg-gray-500 cursor-not-allowed' : 'bg-pink-600 hover:bg-pink-700'}`}
+            >
+                {loading ? 'Analyzing Data...' : 'Get Next Phase Recommendation'}
+            </button>
+            {advice && (
+                <div className="mt-4 p-3 bg-gray-900 rounded-lg border border-pink-700">
+                    <p className="text-sm italic text-white">{advice}</p>
+                </div>
+            )}
+            {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+        </div>
+    );
+};
+
+const ProgressDashboard = ({ kpis, volumeData, cardColor, userId }) => {
+    
+    // Determine the current weekly volume trend for the home screen (last data point)
+    const latestVolume = volumeData.length > 0 ? volumeData[volumeData.length - 1].Volume : 0;
+    const previousVolume = volumeData.length > 1 ? volumeData[volumeData.length - 2].Volume : 0;
+    const volumeChange = latestVolume - previousVolume;
+    const volumeTrend = volumeChange > 0 ? `+${volumeChange.toLocaleString()}` : volumeChange.toLocaleString();
+    const trendColor = volumeChange > 0 ? 'text-green-400' : 'text-red-400';
+
+    return (
+        <div className="space-y-6">
+            <h3 className="text-3xl font-extrabold text-red-400 mb-6 border-b border-gray-700 pb-3">Progress & Analytics</h3>
+            
+            {/* User ID and Consistency Report */}
+            <div className={`p-5 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
+                <h4 className="text-xl font-bold mb-2 text-red-400">Consistency Score</h4>
+                <div className="flex justify-between items-center border-t border-gray-700 pt-3">
+                    <p className="font-semibold">Sets Completion Rate</p>
+                    <p className="text-3xl font-extrabold text-green-500">{kpis.consistencyScore}%</p>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">Sets Completed vs. Sets Planned across all logs.</p>
+            </div>
+
+            {/* KPI Card Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                
+                {/* KPI 1: Total Volume Lifted */}
+                <div className={`p-5 rounded-xl shadow-lg ${cardColor} border-t-4 border-red-500 border border-gray-700`}>
+                    <p className="text-sm font-medium text-gray-500">Total Volume Lifted (kg/lb)</p>
+                    <p className="text-3xl font-extrabold mt-1 text-red-400">{kpis.totalVolume.toLocaleString()}</p>
+                    {/* FIX 1: Simplified math notation */}
+                    <p className="text-xs text-gray-500">Volume = Sum of (Weight x Reps)</p> 
+                </div>
+
+                {/* KPI 2: Progressive Overload Ratio */}
+                <div className={`p-5 rounded-xl shadow-lg ${cardColor} border-t-4 border-pink-500 border border-gray-700`}>
+                    <p className="text-sm font-medium text-gray-500">New Max Volume Ratio</p>
+                    <p className="text-3xl font-extrabold mt-1 text-pink-500">{kpis.overloadRatio}%</p>
+                    <p className="text-xs text-gray-500">Sets that surpassed previous max volume for that exercise.</p>
+                </div>
+
+                {/* KPI 3: Lifts Completed */}
+                <div className={`p-5 rounded-xl shadow-lg ${cardColor} border-t-4 border-yellow-500 border border-gray-700`}>
+                    <p className="text-sm font-medium text-gray-500">Total Sets Completed</p>
+                    <p className="text-3xl font-extrabold mt-1 text-yellow-500">{kpis.totalSetsCompleted}</p>
+                    <p className="text-xs text-gray-500">Measure of sustained effort (volume base).</p>
+                </div>
+            </div>
+
+            {/* Volume Trend Chart */}
+            <div className={`p-5 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
+                <h4 className="text-xl font-bold mb-2">Weekly Volume Trend</h4>
+                <p className={`text-sm font-semibold mb-3 ${trendColor}`}>
+                    Weekly Volume Change: {volumeTrend} (from last tracked week)
+                </p>
+                <div style={{ width: '100%', height: 250 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={volumeData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                            <defs>
+                                <linearGradient id="colorVolume" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#ef4444" stopOpacity={0.8}/>
+                                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0.1}/>
+                                </linearGradient>
+                            </defs>
+                            <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                            <XAxis dataKey="name" stroke="#9ca3af" tick={{ fontSize: 10 }} />
+                            <YAxis stroke="#9ca3af" tick={{ fontSize: 10 }} />
+                            <Tooltip contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }} itemStyle={{ color: '#fca5a5' }}/>
+                            <Area type="monotone" dataKey="Volume" stroke="#ef4444" fillOpacity={1} fill="url(#colorVolume)" />
+                        </AreaChart>
+                    </ResponsiveContainer>
+                </div>
+            </div>
+
+            {/* Gemini Loadout Planner */}
+            <AILoadoutPlanner kpis={kpis} cardColor={cardColor} />
+        </div>
+    );
+};
+
+const HomeDashboard = ({ localLog, currentDate, kpis, volumeData, cardColor }) => { 
+    
+    const latestVolume = volumeData.length > 0 ? volumeData[volumeData.length - 1].Volume : 0;
+    const previousVolume = volumeData.length > 1 ? volumeData[volumeData.length - 2].Volume : 0;
+    const volumeChange = latestVolume - previousVolume;
+    const volumeTrend = volumeChange > 0 ? `+${(volumeChange/1000).toFixed(1)}k` : `${(volumeChange/1000).toFixed(1)}k`;
+    const trendColor = volumeChange > 0 ? 'text-green-400' : 'text-red-400';
+
+    const todayName = currentDate.toLocaleDateString('en-US', { weekday: 'long' });
+    const isRestDay = !localLog;
+    const workoutName = isRestDay ? "Recovery / Skill Work" : localLog.name;
+    const workoutAccent = isRestDay ? "text-yellow-500" : "text-red-400";
+    
+    return (
+        <div className="space-y-6">
+            <div className={`p-6 rounded-xl shadow-2xl ${cardColor} border-l-4 border-red-500`}>
+                <p className="text-xl font-medium text-gray-400">Welcome Back, Athlete.</p>
+                <h3 className={`text-3xl font-extrabold mt-1 ${workoutAccent}`}>{todayName}</h3>
+            </div>
+
+            {/* Today's Workout Card (CTA) */}
+            <div className={`p-6 rounded-xl shadow-xl ${cardColor} border border-gray-700`}>
+                <p className="text-sm font-medium text-gray-500">Today's Session</p>
+                <h4 className="text-2xl font-bold mt-1 mb-4 text-red-400">{workoutName}</h4>
+                <a href="#training" onClick={() => document.getElementById('training-tab').click()} className={`w-full block text-center py-3 px-4 rounded-xl font-bold text-white transition-all duration-300 transform active:scale-95 bg-red-600 hover:bg-red-700`}>
+                    {isRestDay ? 'Review Schedule' : 'Start Workout'}
+                </a>
+            </div>
+
+            {/* Quick Metrics (Stat Tiles) */}
+            <div className="grid grid-cols-2 gap-4">
+                <div className={`p-4 rounded-xl shadow-lg ${cardColor} border border-gray-700`}>
+                    <p className="text-sm font-medium text-gray-500">Weekly Volume</p>
+                    <p className="text-2xl font-extrabold mt-1 text-red-400">
+                        {(latestVolume/1000).toFixed(1)}K
+                    </p>
+                    <p className={`text-xs ${trendColor} font-semibold`}>
+                        {volumeTrend} change
+                    </p>
+                </div>
+                <div className={`p-4 rounded-xl shadow-lg ${cardColor} border border-gray-700`}>
+                    <p className="text-sm font-medium text-gray-500">Consistency</p>
+                    <p className="text-2xl font-extrabold mt-1 text-green-500">
+                        {kpis.consistencyScore}%
+                    </p>
+                    <p className="text-xs text-gray-500 font-semibold">
+                        {kpis.totalSetsCompleted} sets logged
+                    </p>
+                </div>
+            </div>
+            
+        </div>
+    );
+};
+
+
+// --- AI FORM CUE GENERATOR ---
+const AIFormCueGenerator = ({ cardColor }) => {
+    const [selectedExercise, setSelectedExercise] = useState(WORKOUT_SCHEDULE[1].exercises[0].name);
+    const [cues, setCues] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+
+    const generateCues = useCallback(async () => {
+        setLoading(true);
+        setCues([]);
+        setError(null);
+
+        const prompt = `Generate a concise, 3-point checklist of the most important form cues for maximizing hypertrophy on the ${selectedExercise}. The response must be only three short bullet points.`;
+        const systemPrompt = "Act as an elite biomechanics expert. Your response must be a valid JSON array of strings, where each string is one short, actionable form cue. DO NOT include introductory or concluding text. Just the array.";
+
+        const payload = {
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "ARRAY",
+                    items: { "type": "STRING" }
+                }
+            }
+        };
+
+        try {
+            const response = await fetch(API_URL_TEXT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+            
+            const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            const parsedCues = JSON.parse(jsonText);
+            
+            if (Array.isArray(parsedCues)) {
+                setCues(parsedCues);
+            } else {
+                setError("Invalid JSON format received from AI.");
+            }
+
+        } catch (err) {
+            console.error("Gemini Form Cue API Error:", err);
+            setError("Failed to generate form cues.");
+        } finally {
+            setLoading(false);
+        }
+    }, [selectedExercise]);
+
+    // Gather all unique exercises for the selector
+    const allExercises = [
+        ...WORKOUT_SCHEDULE[1].exercises, 
+        ...WORKOUT_SCHEDULE[2].exercises,
+        ...WORKOUT_SCHEDULE[4].exercises,
+        ...WORKOUT_SCHEDULE[5].exercises
+    ];
+    const uniqueExercises = [...new Map(allExercises.map(item => [item.name, item])).values()];
+
+
+    return (
+        <div className="space-y-6">
+            <h3 className="text-3xl font-extrabold text-red-400 mb-6 border-b border-gray-700 pb-3">Exercise Library (RP Guide)</h3>
+            
+            <div className={`p-5 rounded-xl shadow-lg ${cardColor} border border-red-800`}>
+                <h4 className="text-xl font-bold mb-3 text-pink-400 flex items-center">
+                    <span className="mr-2">🏋️‍♀️</span> ✨ Form Cue Generator
+                </h4>
+                <select
+                    value={selectedExercise}
+                    onChange={(e) => { setSelectedExercise(e.target.value); setCues([]); }}
+                    className="w-full p-2 rounded-lg bg-gray-700 text-white border border-gray-600 mb-4"
+                >
+                    {uniqueExercises.map(ex => (
+                        <option key={ex.id} value={ex.name}>{ex.name}</option>
+                    ))}
+                </select>
+                <button
+                    onClick={generateCues}
+                    disabled={loading}
+                    className={`w-full py-2 px-4 rounded-lg font-bold text-white transition-all duration-300 ${loading ? 'bg-gray-500 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
+                >
+                    {loading ? 'Generating Cues...' : `Generate Cues for ${selectedExercise}`}
+                </button>
+
+                {cues.length > 0 && (
+                    <ul className="mt-4 p-3 bg-gray-900 rounded-lg border border-red-700 space-y-1">
+                        {cues.map((cue, index) => (
+                            <li key={index} className="text-sm text-white list-disc ml-4">{cue}</li>
+                        ))}
+                    </ul>
+                )}
+                {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+            </div>
+
+            {/* List of Exercises (Existing Feature) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {uniqueExercises.map((ex, index) => (
+                    <div key={index} className={`p-4 rounded-xl shadow-lg ${cardColor} border border-gray-700`}>
+                        <p className="text-lg font-bold text-white">{ex.name}</p>
+                        <p className="text-sm text-red-400 mt-1">{getMuscleGroup(ex.name)}</p>
+                        <p className="text-xs text-gray-500 mt-2 italic">
+                            Goal: {ex.repRange} Reps | Cue: {ex.technique.substring(0, 50)}...
+                        </p>
+                        <div className="mt-3 flex items-center space-x-2 text-xs text-gray-400 hover:text-red-400 transition-colors cursor-pointer">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" /></svg>
+                            <span>Watch Form Video (Mock)</span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+
+// --- SPLASH SCREEN ---
+const SplashScreen = ({ theme, onStart }) => {
+    const bgColor = theme === 'dark' ? 'bg-gray-900' : 'bg-gray-100';
+    const textColor = theme === 'dark' ? 'text-gray-100' : 'text-gray-900';
+
+    return (
+        <div className={`min-h-screen flex flex-col items-center justify-center ${bgColor} ${textColor} transition-colors duration-500 p-8`}>
+            <div className="text-center">
+                <div className="animate-pulse mb-6">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-20 w-20 text-red-600 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                </div>
+                <h1 className="text-5xl font-black text-red-400 mb-2">Hypertrophy Ascent</h1>
+                <p className="text-lg text-gray-500">Your personalized training journey starts now.</p>
+                <button
+                    onClick={onStart}
+                    className="mt-12 py-3 px-8 rounded-xl font-bold text-lg text-white transition-all duration-300 transform active:scale-95 bg-red-600 hover:bg-red-700 shadow-xl shadow-red-900/50"
+                >
+                    Start Your Ascent
+                </button>
+            </div>
+        </div>
+    );
+};
+
+
+// --- MAIN APP COMPONENT ---
+const App = () => {
+    const { db, userId, isAuthReady } = useFirebase();
+    const { logs, saveLog } = useLogs(db, userId, isAuthReady);
+    const { kpis, volumeData } = useKPIs(logs);
+
+    const [currentDate, setCurrentDate] = useState(new Date());
+    const [activeTab, setActiveTab] = useState('home'); 
+    const [theme, setTheme] = useState('dark'); 
+    const [hasStarted, setHasStarted] = useState(false); 
+
+    const [timerSettings, setTimerSettings] = useState({ isRunning: false, initialTime: 90 });
+
+    const toggleTheme = () => setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+
+    const navigateDate = (days) => {
+        const newDate = new Date(currentDate);
+        newDate.setDate(newDate.getDate() + days);
+        setCurrentDate(newDate);
+    };
+
+    const dateString = formatDate(currentDate);
+    const logData = logs[dateString] || null;
+
+    const currentWorkout = useMemo(() => {
+        return getWorkoutForDate(currentDate, logs);
+    }, [currentDate, logs]);
+
+    const [localLog, setLocalLog] = useState(null);
+    const [prevLogData, setPrevLogData] = useState(null); 
+
+    useEffect(() => {
+        if (currentWorkout) {
+            let lastLog = null;
+            const sortedDates = Object.keys(logs).sort().reverse();
+            for (const date of sortedDates) {
+                if (logs[date].name === currentWorkout.name) {
+                    lastLog = logs[date];
+                    break;
+                }
+            }
+            setPrevLogData(lastLog);
+
+
+            const initialLog = logData ? { ...logData } : {
+                name: currentWorkout.name,
+                isComplete: false,
+                exercises: currentWorkout.exercises.map(ex => ({
+                    ...ex,
+                    setsData: Array(ex.sets).fill().map((_, index) => ({
+                        set: index + 1,
+                        weight: 0,
+                        reps: 0,
+                        isDone: false,
+                    }))
+                }))
+            };
+            setLocalLog(initialLog);
+        } else {
+            setLocalLog(null);
+        }
+    }, [currentWorkout, logData, logs]);
+
+    const handleSetChange = useCallback((exId, setIndex, field, value) => {
+        setLocalLog(prevLog => {
+            if (!prevLog) return prevLog;
+            
+            const updatedExercises = prevLog.exercises.map(ex => {
+                if (ex.id === exId) {
+                    const updatedSetsData = ex.setsData.map((set, index) => {
+                        if (index === setIndex) {
+                            const newValue = field === 'isDone' ? value : Number(value);
+                            return { ...set, [field]: newValue };
+                        }
+                        return set;
+                    });
+                    return { ...ex, setsData: updatedSetsData };
+                }
+                return ex;
+            });
+
+            const allSetsDone = updatedExercises.every(ex => ex.setsData.every(set => set.isDone));
+            
+            return {
+                ...prevLog,
+                exercises: updatedExercises,
+                isComplete: allSetsDone
+            };
+        });
+    }, []);
+
+    useEffect(() => {
+        if (localLog && db && userId && isAuthReady) {
+             saveLog(dateString, localLog);
+        }
+    }, [localLog, dateString, saveLog, db, userId, isAuthReady]);
+
+    const bgColor = theme === 'dark' ? 'bg-gray-900' : 'bg-gray-100';
+    const textColor = theme === 'dark' ? 'text-gray-100' : 'text-gray-900';
+    const cardColor = theme === 'dark' ? 'bg-gray-800' : 'bg-white';
+
+    // --- RENDER FUNCTIONS ---
+    if (!isAuthReady || !hasStarted) {
+        return <SplashScreen theme={theme} onStart={() => setHasStarted(true)} />;
+    }
+
+    const renderContent = () => {
+        switch (activeTab) {
+            case 'home':
+                return <HomeDashboard localLog={localLog} currentDate={currentDate} kpis={kpis} volumeData={volumeData} cardColor={cardColor} />;
+            case 'training':
+                return (
+                    <TrainingProgram 
+                        localLog={localLog}
+                        prevLogData={prevLogData}
+                        currentDate={currentDate}
+                        navigateDate={navigateDate}
+                        handleSetChange={handleSetChange}
+                        inputColor={theme === 'dark' ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-900'}
+                        cardColor={cardColor}
+                        buttonPrimary={theme === 'dark' ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-red-500 hover:bg-red-600 text-white'}
+                        logs={logs}
+                        userId={userId}
+                        timerSettings={timerSettings}
+                        setTimerSettings={setTimerSettings}
+                        isAuthReady={isAuthReady}
+                    />
+                );
+            case 'progress':
+                return <ProgressDashboard kpis={kpis} volumeData={volumeData} cardColor={cardColor} userId={userId} />;
+            case 'library':
+                return <ExerciseLibrary cardColor={cardColor} />;
+            default:
+                return <HomeDashboard localLog={localLog} currentDate={currentDate} kpis={kpis} volumeData={volumeData} cardColor={cardColor} />;
+        }
+    };
+
+    // --- MAIN RENDER ---
+    return (
+        <div className={`min-h-screen ${bgColor} ${textColor} font-inter transition-colors duration-500`}>
+            <div className="max-w-4xl mx-auto p-4 sm:p-6 pb-20">
+                
+                {/* Header and Controls */}
+                <header className="flex justify-between items-center mb-6 pt-4">
+                    <h1 className="text-3xl font-black text-red-400">Hypertrophy Ascent</h1>
+                    <div className="flex items-center space-x-3">
+                        <button
+                            onClick={toggleTheme}
+                            className={`p-2 rounded-full transition-colors duration-300 ${cardColor} hover:text-red-400`}
+                            title="Toggle Theme"
+                        >
+                            {theme === 'dark' ? 
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                                </svg>
+                                :
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                                </svg>
+                            }
+                        </button>
+                    </div>
+                </header>
+
+                {/* Main Content Rendered Here */}
+                {renderContent()}
+                
+            </div>
+            
+            {/* BOTTOM FIXED NAVIGATION BAR (RP Inspired) */}
+            <nav className={`fixed bottom-0 left-0 right-0 ${cardColor} border-t border-gray-700 shadow-2xl`}>
+                <div className="max-w-4xl mx-auto flex justify-around">
+                    {[
+                        { id: 'home', label: 'Home', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg> },
+                        { id: 'training', label: 'Training', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l-2 2M15 19V6l2 2m-6-4l-4 4m8-4l4 4" /></svg> },
+                        { id: 'progress', label: 'Progress', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M18 10a8 8 0 10-16 0 8 8 0 0016 0z" /></svg> },
+                        { id: 'library', label: 'Library', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13a4.75 4.75 0 00-4.75 4.75v3.25l-2.25 2.25M12 6.253a4.75 4.75 0 014.75 4.75v3.25l2.25 2.25m-11.25 0h11.25" /></svg> },
+                    ].map(item => (
+                        <button
+                            key={item.id}
+                            id={`${item.id}-tab`}
+                            onClick={() => setActiveTab(item.id)}
+                            className={`flex flex-col items-center p-3 text-xs font-medium transition-colors duration-300 ${
+                                activeTab === item.id ? 'text-red-400' : 'text-gray-500 hover:text-gray-300'
+                            }`}
+                        >
+                            {item.icon}
+                            <span className="mt-1">{item.label}</span>
+                        </button>
+                    ))}
+                </div>
+            </nav>
+        </div>
+    );
+};
+
+export default App;
