@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hypertrophy Ascent Training Log</title>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Load React, Babel, and Recharts core libraries (PRODUCTION BUILDS & CORRECT ORDER from jsDelivr) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Set NODE_ENV to production to further suppress dev warnings -->
+    <script>window.process = { env: { NODE_ENV: 'production' } };</script>
+
+    <style>
+        /* Set font family for aesthetics and apply dark background */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #101010; /* Near-black background */
+        }
+        /* Custom styles for a sleeker range input (slider) */
+        input[type="range"] {
+            background: linear-gradient(to right, #BEF264 0%, #BEF264 var(--range-percent, 50%), #404040 var(--range-percent, 50%), #404040 100%);
+            height: 8px;
+            border-radius: 4px;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            border: 2px solid #BEF264;
+            cursor: pointer;
+            box-shadow: 0 0 5px rgba(190, 242, 100, 0.5);
+            transition: background 0.3s, transform 0.1s;
+        }
+        input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.1);
+        }
+        /* Custom scrollbar for a more native feel */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #101010;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #404040;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #525252;
+        }
+        .animate-fadeIn { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-toastIn { animation: toastIn 0.3s ease-out forwards; }
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateY(-20px) scale(0.9); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .confetti {
+            position: fixed; inset: 0; pointer-events:none; z-index: 100;
+            background:
+                radial-gradient(circle, #BEF264 3px, transparent 4px) 20% 20%/8px 8px,
+                radial-gradient(circle, #60A5FA 3px, transparent 4px) 40% 60%/8px 8px,
+                radial-gradient(circle, #F472B6 3px, transparent 4px) 70% 30%/8px 8px;
+            animation: pop 600ms ease-out forwards;
+        }
+        @keyframes pop {
+            from { opacity:0; transform: scale(0.98); }
+            50%  { opacity:1; }
+            to   { opacity:0; transform: scale(1.02); }
+        }
+    </style>
+</head>
+<body class="bg-[#101010]">
+    <div id="root"></div>
+
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js';
+        import { getAuth, signInWithCustomToken, onAuthStateChanged, signInAnonymously } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
+        import { getFirestore, doc, setDoc, collection, query, onSnapshot, addDoc, deleteDoc } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
+
+        window.__app_id = 'default-app-id';
+        window.__firebase_config = JSON.stringify({
+            apiKey: "AIzaSyAkupKTGt46IbZLffNXBpiYU2STLTMa9LU",
+            authDomain: "ascent-8210b.firebaseapp.com",
+            projectId: "ascent-8210b",
+            storageBucket: "ascent-8210b.firebasestorage.app",
+            messagingSenderId: "828852947829",
+            appId: "1:828852947829:web:a47dba430c95a02604a13c",
+            measurementId: "G-LCMP9VKTN4"
+        });
+        window.__initial_auth_token = '';
+        
+        if (typeof crypto.randomUUID === 'undefined') {
+            crypto.randomUUID = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        }
+
+        const firebaseConfig = JSON.parse(window.__firebase_config);
+        
+        window.FB = { initializeApp, getAuth, signInWithCustomToken, onAuthStateChanged, signInAnonymously, getFirestore, doc, setDoc, collection, query, onSnapshot, addDoc, deleteDoc };
+        
+        try {
+            const app = initializeApp(firebaseConfig);
+            window.dbInstance = getFirestore(app);
+            window.authInstance = getAuth(app);
+            const signIn = async () => {
+                try {
+                    if (window.__initial_auth_token) await window.FB.signInWithCustomToken(window.authInstance, window.__initial_auth_token);
+                    else await window.FB.signInAnonymously(window.authInstance); 
+                } catch (error) { console.error("Firebase Sign-in Failed:", error); }
+            };
+            signIn();
+        } catch (error) { console.error("Firebase Init Error:", error); }
+    </script>
+
+    <script type="text/babel">
+    (async () => {
+        // Wait up to ~2s for Recharts to attach to window
+        let tries = 0;
+        while (!window.Recharts && tries < 20) {
+            await new Promise(r => setTimeout(r, 100));
+            tries++;
+        }
+        if (!window.Recharts) {
+            console.error('Recharts failed to load. Check the <script> src URL and network.');
+            const rootEl = document.getElementById('root');
+            if (rootEl) {
+                rootEl.innerHTML = '<div style="color: red; padding: 20px;">Error: Charting library failed to load. Please check your network connection and refresh.</div>';
+            }
+            return;
+        }
+
+        const { useState, useEffect, useCallback, useMemo, useRef } = React;
+        const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, Legend, BarChart, Bar, PieChart, Pie, Cell } = window.Recharts;
+
+        const API_KEY = ""; /* PASTE YOUR GEMINI API KEY HERE! */
+        const TEXT_MODEL = "gemini-2.5-flash-preview-05-20";
+        const API_URL_TEXT = `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent?key=${API_KEY}`;
+
+        const USER_NAME = "Sean";
+        const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
+
+        const TRAINING_PLANS = {
+            'metabolic-hypertrophy': {
+                name: "Metabolic Hypertrophy Phase",
+                description: "A 4-day split focusing on maximizing metabolic stress (pump), time under tension, and progressive overload through rep ranges. Ideal for muscle growth.",
+                schedule: {
+                    1: { name: 'Legs 1 (Pump Focus)', day: 'Monday', exercises: [ { id: 101, name: 'Hack Squat or Leg Press', sets: 3, repRange: '10-12', rest: 90, primary: 'quads', secondary: ['glutes'] }, { id: 102, name: 'Romanian Deadlift (RDL)', sets: 3, repRange: '8-10', rest: 90, primary: 'hamstrings', secondary: ['glutes'] }, { id: 103, name: 'Seated Leg Curl', sets: 3, repRange: '12-15', rest: 60, primary: 'hamstrings' }, { id: 104, name: 'Calf Raises', sets: 3, repRange: '15-20', rest: 45, primary: 'calves' } ] },
+                    2: { name: 'Push (Volume/Pump)', day: 'Tuesday', exercises: [ { id: 201, name: 'Machine Chest Press', sets: 3, repRange: '12-15', rest: 75, primary: 'chest' }, { id: 202, name: 'Machine Shoulder Press', sets: 3, repRange: '10-12', rest: 75, primary: 'delts' }, { id: 203, name: 'Dumbbell or Machine Flyes', sets: 3, repRange: '15-20', rest: 45, primary: 'chest' }, { id: 204, name: 'Cable Triceps Pushdown', sets: 3, repRange: '15-20', rest: 45, primary: 'triceps' } ] },
+                    4: { name: 'Pull (Max Pump/Density)', day: 'Thursday', exercises: [ { id: 401, name: 'Wide Grip Lat Pulldown', sets: 3, repRange: '12-15', rest: 45, primary: 'back' }, { id: 402, name: 'Seated Cable Row', sets: 3, repRange: '12-15', rest: 45, primary: 'back' }, { id: 403, name: 'Cable Bicep Curl', sets: 3, repRange: '15-20', rest: 45, primary: 'biceps' }, { id: 404, name: 'Face Pull', sets: 2, repRange: '20-25', rest: 45, primary: 'delts', secondary: ['back'] } ] },
+                    5: { name: 'Legs 2 (Max Metabolic Stress)', day: 'Friday', exercises: [ { id: 501, name: 'Leg Extension', sets: 4, repRange: '15-20', rest: 45, primary: 'quads' }, { id: 502, name: 'Seated Leg Curl', sets: 4, repRange: '15-20', rest: 45, primary: 'hamstrings' }, { id: 503, name: 'Walking Lunges', sets: 3, repRange: '12 steps/leg', rest: 75, primary: 'quads', secondary: ['glutes'] }, { id: 504, name: 'Calf Raises', sets: 3, repRange: '15-20', rest: 45, primary: 'calves' } ] },
+                }
+            },
+            'classic-ppl': {
+                name: "Classic Push/Pull/Legs",
+                description: "A 6-day split that hits each muscle group twice a week. It balances strength progression on compound lifts with volume for hypertrophy.",
+                schedule: {
+                     1: { name: 'Push 1 (Strength)', day: 'Monday', exercises: [ { id: 701, name: 'Bench Press', sets: 4, repRange: '4-6', rest: 120, primary: 'chest' }, { id: 702, name: 'Overhead Press (Barbell)', sets: 3, repRange: '6-8', rest: 90, primary: 'delts' }, { id: 703, name: 'Incline Dumbbell Press', sets: 3, repRange: '8-12', rest: 75, primary: 'chest' }, { id: 704, name: 'Triceps Dips (Weighted)', sets: 3, repRange: '8-12', rest: 60, primary: 'triceps' }, { id: 705, name: 'Lateral Raises', sets: 4, repRange: '12-15', rest: 45, primary: 'delts' } ]},
+                     2: { name: 'Pull 1 (Strength)', day: 'Tuesday', exercises: [ { id: 801, name: 'Deadlifts', sets: 3, repRange: '3-5', rest: 180, primary: 'back', secondary: ['hamstrings', 'glutes'] }, { id: 802, name: 'Weighted Pull-ups', sets: 4, repRange: '6-8', rest: 90, primary: 'back' }, { id: 803, name: 'Barbell Rows', sets: 3, repRange: '8-10', rest: 75, primary: 'back' }, { id: 804, name: 'Face Pulls', sets: 3, repRange: '12-15', rest: 45, primary: 'delts' }, { id: 805, name: 'Bicep Curls (Barbell)', sets: 3, repRange: '8-12', rest: 60, primary: 'biceps' } ]},
+                     3: { name: 'Legs 1 (Strength)', day: 'Wednesday', exercises: [ { id: 901, name: 'Barbell Squats', sets: 4, repRange: '4-6', rest: 150, primary: 'quads', secondary: ['glutes'] }, { id: 902, name: 'Romanian Deadlift (RDL)', sets: 3, repRange: '8-10', rest: 90, primary: 'hamstrings' }, { id: 903, name: 'Leg Press', sets: 3, repRange: '10-15', rest: 75, primary: 'quads' }, { id: 904, name: 'Leg Curls', sets: 3, repRange: '12-15', rest: 60, primary: 'hamstrings' }, { id: 905, name: 'Calf Raises', sets: 4, repRange: '10-15', rest: 45, primary: 'calves' } ]},
+                     4: { name: 'Push 2 (Hypertrophy)', day: 'Thursday', exercises: [ { id: 1001, name: 'Incline Bench Press', sets: 4, repRange: '8-12', rest: 75, primary: 'chest' }, { id: 1002, name: 'Seated Dumbbell Press', sets: 4, repRange: '10-15', rest: 60, primary: 'delts' }, { id: 1003, name: 'Machine Chest Fly', sets: 3, repRange: '12-15', rest: 45, primary: 'chest' }, { id: 1004, name: 'Triceps Pushdown', sets: 4, repRange: '12-15', rest: 45, primary: 'triceps' }, { id: 1005, name: 'Cable Lateral Raises', sets: 4, repRange: '15-20', rest: 45, primary: 'delts' } ]},
+                     5: { name: 'Pull 2 (Hypertrophy)', day: 'Friday', exercises: [ { id: 1101, name: 'Lat Pulldowns', sets: 4, repRange: '10-15', rest: 60, primary: 'back' }, { id: 1102, name: 'Seated Cable Rows', sets: 4, repRange: '10-15', rest: 60, primary: 'back' }, { id: 1103, name: 'Dumbbell Rows', sets: 3, repRange: '8-12', rest: 75, primary: 'back' }, { id: 1104, name: 'Dumbbell Bicep Curls', sets: 4, repRange: '10-15', rest: 45, primary: 'biceps' }, { id: 1105, name: 'Hammer Curls', sets: 3, repRange: '10-15', rest: 45, primary: 'biceps' } ]},
+                     6: { name: 'Legs 2 (Hypertrophy)', day: 'Saturday', exercises: [ { id: 1201, name: 'Leg Press', sets: 4, repRange: '12-15', rest: 75, primary: 'quads' }, { id: 1202, name: 'Leg Extensions', sets: 4, repRange: '15-20', rest: 45, primary: 'quads' }, { id: 1203, name: 'Lying Leg Curls', sets: 4, repRange: '15-20', rest: 45, primary: 'hamstrings' }, { id: 1204, name: 'Hack Squats', sets: 3, repRange: '10-15', rest: 90, primary: 'quads' }, { id: 1205, name: 'Seated Calf Raises', sets: 4, repRange: '15-20', rest: 45, primary: 'calves' } ]},
+                }
+            }
+        };
+
+        const BJJ_TECHNIQUES = [
+            { id: 'bjj01', name: 'Rear Naked Choke', position: 'Back Control' },
+            { id: 'bjj02', name: 'Armbar from Guard', position: 'Guard' },
+            { id: 'bjj03', name: 'Triangle Choke', position: 'Guard' },
+            { id: 'bjj04', name: 'Kimura from Side Control', position: 'Side Control' },
+            { id: 'bjj05', name: 'Guillotine Choke', position: 'Front Headlock' },
+            { id: 'bjj06', name: 'Heel Hook', position: 'Leg Entanglements' },
+        ];
+
+        const formatDate = (date) => date.toISOString().split('T')[0];
+        
+        const getWorkoutForDate = (currentDate, allLogs = {}) => {
+            const sequence = [1, 2, 4, 5];
+            const currentDayKey = currentDate.getDay();
+            if (currentDayKey === 0 || currentDayKey === 3 || currentDayKey === 6) return null;
+
+            let nextWorkoutKey = 1;
+            const completedLogs = Object.keys(allLogs || {})
+                .filter(date => allLogs[date]?.isComplete)
+                .sort((a, b) => new Date(b) - new Date(a));
+
+            if (completedLogs.length > 0) {
+                const lastCompletedLog = allLogs[completedLogs[0]];
+                const lastCompletedKey = sequence.find(k => TRAINING_PLANS['metabolic-hypertrophy'].schedule[k]?.name === lastCompletedLog?.name);
+                if (lastCompletedKey !== undefined) {
+                    const lastIndex = sequence.indexOf(lastCompletedKey);
+                    const nextIndex = (lastIndex + 1) % sequence.length;
+                    nextWorkoutKey = sequence[nextIndex];
+                }
+            }
+            return { id: nextWorkoutKey, ...TRAINING_PLANS['metabolic-hypertrophy'].schedule[nextWorkoutKey] };
+        };
+
+
+        const useFirebase = () => {
+            const [userId, setUserId] = useState(null);
+            const [isAuthReady, setIsAuthReady] = useState(false);
+            useEffect(() => {
+                if (!window.authInstance || !window.FB) { setIsAuthReady(true); return; }
+                const unsubscribe = window.FB.onAuthStateChanged(window.authInstance, (user) => {
+                    setUserId(user ? user.uid : crypto.randomUUID());
+                    setIsAuthReady(true);
+                });
+                return () => unsubscribe();
+            }, []);
+            return { db: window.dbInstance, auth: window.authInstance, userId, isAuthReady };
+        };
+
+        const useLogs = (db, userId, isAuthReady, logType) => {
+            const [logs, setLogs] = useState({});
+            useEffect(() => {
+                if (!db || !userId || !isAuthReady || !window.FB) return;
+                const path = `artifacts/${appId}/users/${userId}/${logType}`;
+                const q = window.FB.query(window.FB.collection(db, path));
+                const unsubscribe = window.FB.onSnapshot(q, (snapshot) => {
+                    const newLogs = {};
+                    snapshot.forEach(doc => newLogs[doc.id] = { ...doc.data(), id: doc.id });
+                    setLogs(newLogs);
+                }, (error) => console.error(`Error fetching ${logType}:`, error));
+                return () => unsubscribe();
+            }, [db, userId, isAuthReady, logType]);
+
+            const saveLog = useCallback(async (dateString, logData) => {
+                if (!db || !userId || !window.FB) return;
+                try {
+                    const path = `artifacts/${appId}/users/${userId}/${logType}`;
+                    const docRef = window.FB.doc(db, path, dateString);
+                    const { id: _ignore, ...rest } = logData || {};
+                    const sanitized = JSON.parse(JSON.stringify(rest, (_, v) => (v === undefined ? null : v)));
+                    await window.FB.setDoc(docRef, sanitized, { merge: true });
+                } catch (error) { console.error(`Error saving ${logType}:`, error); }
+            }, [db, userId, logType]);
+            return { logs, saveLog };
+        };
+
+        const useRecoveryLogs = (db, userId, isAuthReady) => {
+            const { logs = {}, saveLog } = useLogs(db, userId, isAuthReady, 'recovery_logs');
+            const [recoveryData, setRecoveryData] = useState([]);
+
+            useEffect(() => {
+                const chartData = Object.keys(logs || {}).map(date => {
+                const log = logs[date] || {};
+                return {
+                    name: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                    Wellness: log.wellness ?? 5,
+                    Soreness: log.soreness ?? 3,
+                    Sleep: log.sleepQuality ?? 7,
+                    date
+                };
+                }).sort((a, b) => new Date(a.date) - new Date(b.date));
+                setRecoveryData(chartData);
+            }, [logs]);
+
+            return { recoveryLogs: logs || {}, saveRecoveryData: saveLog, recoveryChartData: recoveryData };
+        };
+
+
+        const useWorkoutLogs = (db, userId, isAuthReady) => useLogs(db, userId, isAuthReady, 'workout_logs');
+        const useCardioLogs = (db, userId, isAuthReady) => useLogs(db, userId, isAuthReady, 'cardio_logs');
+        const useNutritionLogs = (db, userId, isAuthReady) => {
+            const [logs, setLogs] = useState({});
+            useEffect(() => {
+                if (!db || !userId || !isAuthReady) return;
+                const path = `artifacts/${appId}/users/${userId}/nutrition_logs`;
+                const q = window.FB.query(window.FB.collection(db, path));
+                const unsubscribe = window.FB.onSnapshot(q, (snapshot) => {
+                    const newLogs = {};
+                    snapshot.forEach(doc => newLogs[doc.id] = { ...doc.data(), id: doc.id });
+                    setLogs(newLogs);
+                });
+                return () => unsubscribe();
+            }, [db, userId, isAuthReady]);
+
+            const saveLog = useCallback(async (dateString, logData) => {
+                if (!db || !userId) return;
+                const path = `artifacts/${appId}/users/${userId}/nutrition_logs`;
+                const docRef = window.FB.doc(db, path, dateString);
+                await window.FB.setDoc(docRef, logData, { merge: true });
+            }, [db, userId]);
+
+            const deleteFoodItem = useCallback(async (dateString, mealType, foodId) => {
+                if(!db || !userId) return;
+                const path = `artifacts/${appId}/users/${userId}/nutrition_logs`;
+                const docRef = window.FB.doc(db, path, dateString);
+                const currentLog = logs[dateString] || {};
+                const updatedMeal = (currentLog[mealType] || []).filter(item => item.id !== foodId);
+                await window.FB.setDoc(docRef, { [mealType]: updatedMeal }, { merge: true });
+            }, [db, userId, logs]);
+
+            return { nutritionLogs: logs, saveNutritionLog: saveLog, deleteFoodItem };
+        };
+
+         const useBjjNotes = (db, userId, isAuthReady) => {
+             const [notes, setNotes] = useState([]);
+            useEffect(() => {
+                if (!db || !userId || !isAuthReady) return;
+                const path = `artifacts/${appId}/users/${userId}/bjj_notes`;
+                const q = window.FB.query(window.FB.collection(db, path));
+                const unsubscribe = window.FB.onSnapshot(q, (snapshot) => {
+                    const newNotes = [];
+                    snapshot.forEach(doc => newNotes.push({ id: doc.id, ...doc.data() }));
+                    setNotes(newNotes.sort((a,b) => b.createdAt - a.createdAt));
+                });
+                return () => unsubscribe();
+            }, [db, userId, isAuthReady]);
+
+            const saveNote = useCallback(async (noteData) => {
+                 if (!db || !userId) return;
+                 const path = `artifacts/${appId}/users/${userId}/bjj_notes`;
+                 await window.FB.addDoc(window.FB.collection(db, path), { ...noteData, createdAt: Date.now() });
+            }, [db, userId]);
+
+            const deleteNote = useCallback(async (noteId) => {
+                if (!db || !userId) return;
+                const path = `artifacts/${appId}/users/${userId}/bjj_notes`;
+                await window.FB.deleteDoc(window.FB.doc(db, path, noteId));
+            }, [db, userId]);
+
+            return { notes, saveNote, deleteNote };
+        };
+
+        const useKPIs = (logs, cardioLogs) => {
+            const safeLogs = logs || {};
+            const [kpis, setKpis] = useState({ totalVolume: 0, consistencyScore: 0, overloadRatio: 0, totalSetsCompleted: 0 });
+            const [volumeData, setVolumeData] = useState([]);
+            const [cardioData, setCardioData] = useState({ low: 0, high: 0 });
+
+            useEffect(() => {
+                const logKeys = Object.keys(safeLogs);
+                const cardioKeys = Object.keys(cardioLogs || {});
+                if (logKeys.length === 0 && cardioKeys.length === 0) {
+                    setKpis({ totalVolume: 0, consistencyScore: 0, overloadRatio: 0, totalSetsCompleted: 0 });
+                    setVolumeData([]);
+                    return;
+                }
+
+                let totalVolume = 0, totalSetsPlanned = 0, totalSetsCompleted = 0, setsWithNewMaxVolume = 0;
+                const maxVolumeByExercise = {}, weeklyVolume = {};
+                const sortedDates = logKeys.sort((a, b) => new Date(a) - new Date(b));
+                sortedDates.forEach(date => {
+                    const log = safeLogs[date] || {};
+                    const dateObj = new Date(date);
+                    const weekStart = new Date(dateObj); weekStart.setDate(dateObj.getDate() - dateObj.getDay());
+                    const weekKey = formatDate(weekStart);
+                    if (!weeklyVolume[weekKey]) weeklyVolume[weekKey] = { volume: 0, date: weekKey };
+                    (log.exercises || []).forEach(exercise => {
+                        const plan = TRAINING_PLANS[log.planId] || Object.values(TRAINING_PLANS)[0];
+                        const plannedWorkout = Object.values(plan.schedule).find(w => w.name === log.name);
+                        totalSetsPlanned += plannedWorkout?.exercises.find(e => e.id === exercise.id)?.sets || 0;
+                        (exercise.setsData || []).forEach(set => {
+                            if (set?.isDone && set.weight > 0 && set.reps > 0) {
+                                const vol = set.weight * set.reps;
+                                totalVolume += vol; weeklyVolume[weekKey].volume += vol; totalSetsCompleted++;
+                                if (vol > (maxVolumeByExercise[exercise.id] || 0)) { maxVolumeByExercise[exercise.id] = vol; setsWithNewMaxVolume++; }
+                            }
+                        });
+                    });
+                });
+                const consistencyScore = totalSetsPlanned ? Math.min(100, Math.round((totalSetsCompleted / totalSetsPlanned) * 100)) : 0;
+                const overloadRatio = totalSetsCompleted ? Math.round((setsWithNewMaxVolume / totalSetsCompleted) * 100) : 0;
+                setKpis({ totalVolume: Math.round(totalVolume), consistencyScore, overloadRatio, totalSetsCompleted });
+                const chartData = Object.keys(weeklyVolume).map(k => ({ name: new Date(k).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), Volume: Math.round(weeklyVolume[k].volume), date: k })).sort((a, b) => new Date(a.date) - new Date(b.date));
+                setVolumeData(chartData);
+                
+                let lowIntensityMinutes = 0, highIntensityMinutes = 0;
+                const oneWeekAgo = new Date(); oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+                Object.keys(cardioLogs || {}).forEach(date => {
+                    if (new Date(date) >= oneWeekAgo) {
+                        const log = cardioLogs[date];
+                        if (log.intensity === 'low') lowIntensityMinutes += Number(log.duration) || 0;
+                        if (log.intensity === 'high') highIntensityMinutes += Number(log.duration) || 0;
+                    }
+                });
+                setCardioData({ low: lowIntensityMinutes, high: highIntensityMinutes });
+
+            }, [safeLogs, cardioLogs]);
+            return { kpis, volumeData, cardioData };
+        };
+
+
+        const SplashScreen = ({ onStart }) => ( <div className="min-h-screen flex flex-col items-center justify-center bg-[#101010] text-white p-8 text-center"> <div className="absolute top-0 left-0 w-full h-full bg-cover bg-center opacity-20" style={{backgroundImage: "url('https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?q=80&w=2940&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D')"}}></div> <div className="relative z-10 flex flex-col justify-between h-full w-full max-w-md mx-auto" style={{minHeight: '80vh'}}> <div> <p className="text-sm font-medium text-gray-400">HYPERTROPHY ASCENT</p> <h1 className="text-5xl font-black uppercase tracking-wider mt-4">Volume Up Your Body Goals</h1> </div> <div className="w-full"> <button onClick={onStart} className="w-full py-4 px-8 rounded-xl font-bold text-lg text-black transition-all duration-300 transform active:scale-95 bg-lime-400 hover:bg-lime-500 shadow-lg shadow-lime-900/50">Start Building Your Body</button> <p className="text-xs text-gray-500 mt-4">Don't have any account? <span className="font-bold text-gray-300">Register</span></p> </div> </div> </div> );
+        const SliderRow = ({ label, value = 5, onChange }) => ( <div> <div className="flex justify-between text-sm"> <span className="text-gray-300">{label}</span> <span className="text-lime-300 font-semibold">{value}</span> </div> <input type="range" min="1" max="10" value={value} onChange={e => onChange(Number(e.target.value), e.target)} className="w-full mt-1" style={{'--range-percent': `${(value / 10) * 100}%`}} /> </div> );
+        const HomeDashboard = ({ localLog, currentDate, kpis, cardColor, recoveryData, saveRecoveryData, setActiveTab, setCurrentDate }) => { const workoutName = localLog ? localLog.name : "Recovery Day"; const handleRecoveryChange = (field, value, element) => { saveRecoveryData(formatDate(currentDate), { ...recoveryData, [field]: value }); if (element) element.style.setProperty('--range-percent', `${(value / 10) * 100}%`); }; const [dateOffset, setDateOffset] = useState(1); return ( <div className="space-y-6 animate-fadeIn"> <header className="flex justify-between items-center"> <div><p className="text-sm text-gray-400">WELCOME BACK,</p><h2 className="text-2xl font-bold uppercase">{USER_NAME}</h2></div> <div className="w-12 h-12 rounded-full bg-gray-700 border-2 border-lime-400"><img src="https://placehold.co/48x48/202020/FFFFFF?text=S" alt="User" className="rounded-full" /></div> </header> <div className="grid grid-cols-3 gap-1 bg-[#1C1C1E] p-1 rounded-xl"> {['Yesterday', 'Today', 'Tomorrow'].map((t, i) => ( <button key={t} onClick={() => { const newDate = new Date(); newDate.setDate(newDate.getDate() + (i - 1)); setCurrentDate(newDate); setDateOffset(i); }} className={`py-2 rounded-lg text-sm font-semibold ${dateOffset === i ? 'bg-lime-400 text-black' : 'text-gray-300'}`}>{t}</button> ))} </div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Personalized Plan</h3> <div onClick={() => setActiveTab('training')} className="mt-2 flex items-center space-x-4 p-3 bg-[#101010] rounded-xl cursor-pointer"> <div className="w-16 h-16 bg-cover bg-center rounded-lg" style={{backgroundImage: "url('https://images.unsplash.com/photo-1534438327276-14e5300c3a48?q=80&w=2940&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D')"}}></div> <div><h4 className="font-bold">{workoutName}</h4><p className="text-xs text-gray-400">{!localLog ? "Focus on mobility and light cardio." : "Tap to start your session."}</p></div> </div> </div> <div className={`${cardColor} p-4 rounded-2xl space-y-4`}> <h3 className="text-lg font-bold">Daily Recovery Log</h3> <SliderRow label="Perceived Wellness" value={recoveryData.wellness || 5} onChange={(v, el) => handleRecoveryChange('wellness', v, el)} /> <SliderRow label="Sleep Quality" value={recoveryData.sleepQuality || 7} onChange={(v, el) => handleRecoveryChange('sleepQuality', v, el)} /> <SliderRow label="Muscle Soreness" value={recoveryData.soreness || 3} onChange={(v, el) => handleRecoveryChange('soreness', v, el)} /> </div> </div> ); };
+        const WarmupCard = () => ( <div className="bg-[#1C1C1E] border border-[#2a2a2a] rounded-2xl p-4 mb-4"> <p className="text-xs text-gray-400 mb-2">Warm-up • 5–6 min</p> <ul className="text-sm space-y-1 list-disc list-inside text-gray-300"> <li>2 min bike / brisk walk</li> <li>Hip openers, thoracic rotations (8/side)</li> <li>Ramp sets for first lift: 30%, 50%, 70% x 3–5 reps</li> </ul> </div> );
+        const ProgramSelector = ({ cardColor, setActivePlanId, closeSelector }) => ( <div className="space-y-6 animate-fadeIn"> <header className="flex justify-between items-center"> <h2 className="text-3xl font-bold uppercase tracking-wide">Select a Program</h2> <button onClick={closeSelector} className="text-2xl font-bold text-gray-400 hover:text-white">&times;</button> </header> {Object.entries(TRAINING_PLANS).map(([planId, plan]) => ( <div key={planId} className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-xl font-bold text-lime-400">{plan.name}</h3> <p className="text-sm text-gray-400 mt-2 mb-4">{plan.description}</p> <button onClick={() => { setActivePlanId(planId); closeSelector(); }} className="w-full py-2 font-bold text-black bg-lime-400 rounded-lg">Select This Plan</button> </div> ))} </div> );
+        const TrainingProgram = ({ localLog, prevLogData, currentDate, handleSetChange, cardColor, activePlanId, setActivePlanId, saveCardioLog }) => { const [showProgramSelector, setShowProgramSelector] = useState(false); const prCacheRef = useRef({}); if (showProgramSelector) { return <ProgramSelector cardColor={cardColor} setActivePlanId={setActivePlanId} closeSelector={() => setShowProgramSelector(false)} />; } const currentPlan = TRAINING_PLANS[activePlanId]; if (!localLog) { const [duration, setDuration] = useState(''); const [distance, setDistance] = useState(''); const [intensity, setIntensity] = useState('low'); const handleSaveCardio = () => { if(!duration) return; saveCardioLog(formatDate(currentDate), { duration, distance, intensity, date: formatDate(currentDate) }); setDuration(''); setDistance(''); window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'success', text: 'Cardio logged!'}})); }; return ( <div className="space-y-6 animate-fadeIn"> <header className="flex justify-between items-center"> <h2 className="text-3xl font-bold uppercase tracking-wide">Rest & Recovery</h2> <button onClick={() => setShowProgramSelector(true)} className="text-xs px-3 py-1 rounded-md bg-gray-700 text-gray-300">Change Program</button> </header> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Log Cardio Session (80/20)</h3> <div className="space-y-3 mt-3"> <input type="number" value={duration} onChange={e => setDuration(e.target.value)} placeholder="Duration (minutes)" className="w-full p-2 bg-[#101010] rounded-md"/> <input type="number" value={distance} onChange={e => setDistance(e.target.value)} placeholder="Distance (miles/km)" className="w-full p-2 bg-[#101010] rounded-md"/> <select value={intensity} onChange={e => setIntensity(e.target.value)} className="w-full p-2 bg-[#101010] rounded-md"> <option value="low">Low Intensity (Zone 2)</option> <option value="high">High Intensity (Zone 4-5)</option> </select> <button onClick={handleSaveCardio} className="w-full py-3 font-bold text-black bg-lime-400 rounded-lg">Save Cardio</button> </div> </div> <div className="text-center p-10 bg-[#1C1C1E] rounded-2xl"> <h3 className="font-bold text-lg mb-2">Current Program</h3> <p className="text-lime-400 font-semibold">{currentPlan.name}</p> </div> </div> ) } const bump = (exId, idx, field, delta) => handleSetChange(exId, idx, field, (localLog.exercises.find(e => e.id === exId).setsData[idx][field] || 0) + delta); const applyPrediction = (exId, idx, pred) => { handleSetChange(exId, idx, 'weight', pred.weight); handleSetChange(exId, idx, 'reps', pred.reps); }; const markDoneAndStartTimer = (exId, idx, seconds, setObj) => { handleSetChange(exId, idx, 'isDone', true); window.dispatchEvent(new CustomEvent('startRestTimer', { detail: { seconds }})); window.dispatchEvent(new CustomEvent('toast', { detail:{ type:'success', text:'Set saved'} })); const vol = (setObj.weight || 0) * (setObj.reps || 0); if (vol > 0) maybeCelebratePR(exId, vol, prCacheRef); }; const nextTarget = (lastReps, min, max, lastWeight) => { if (!lastReps || !lastWeight || lastReps < min) return { reps: min, weight: lastWeight }; if (lastReps < max) return { reps: lastReps + 1, weight: lastWeight }; const up = Math.ceil((lastWeight * 1.025)/2.5)*2.5; return { reps: min, weight: up }; }; const buildPrediction = (exercise, setIndex, prevLog) => { if (!prevLog) return null; const prevEx = prevLog.exercises.find(e=>e.id===exercise.id); if (!prevEx || !prevEx.setsData?.[setIndex]) return null; const [min,max] = exercise.repRange.split('-').map(Number); const last = prevEx.setsData[setIndex]; if (!last?.weight) return null; return nextTarget(last.reps, min, max, last.weight); }; const maybeCelebratePR = (exerciseId, vol, cache) => { cache.current[exerciseId] = cache.current[exerciseId] || 0; if (vol > cache.current[exerciseId]) { cache.current[exerciseId] = vol; const el = document.createElement('div'); el.className = 'confetti'; document.body.appendChild(el); setTimeout(()=>el.remove(), 600); window.dispatchEvent(new CustomEvent('toast',{ detail:{ type:'success', text:'New volume PR!'} })); } }; const SetRowPro = ({ exercise, setObj, setIndex, prevLog }) => { const pred = buildPrediction(exercise, setIndex, prevLog); return ( <div className="rounded-2xl bg-[#121212] p-3 mb-2 border border-[#262626]"> <div className="flex items-center gap-2"> <span className="w-8 text-center font-bold text-lime-400">S{setObj.set}</span> <div className="flex items-center flex-1"><button onClick={()=>bump(exercise.id, setIndex, 'weight', -2.5)} className="h-9 w-9 rounded-lg bg-[#1C1C1E]">–</button><input type="number" inputMode="decimal" className="mx-1 h-9 w-full rounded-lg bg-[#1C1C1E] text-center" value={setObj.weight || ''} placeholder="lbs" onChange={e=>handleSetChange(exercise.id, setIndex, 'weight', e.target.value)} /><button onClick={()=>bump(exercise.id, setIndex, 'weight', +2.5)} className="h-9 w-9 rounded-lg bg-[#1C1C1E]">+</button></div> <div className="flex items-center flex-1"><button onClick={()=>bump(exercise.id, setIndex, 'reps', -1)} className="h-9 w-9 rounded-lg bg-[#1C1C1E]">–</button><input type="number" inputMode="numeric" className="mx-1 h-9 w-full rounded-lg bg-[#1C1C1E] text-center" value={setObj.reps || ''} placeholder="reps" onChange={e=>handleSetChange(exercise.id, setIndex, 'reps', e.target.value)} /><button onClick={()=>bump(exercise.id, setIndex, 'reps', +1)} className="h-9 w-9 rounded-lg bg-[#1C1C1E]">+</button></div> <button onClick={() => markDoneAndStartTimer(exercise.id, setIndex, exercise.rest, setObj)} className={`h-9 px-3 rounded-lg text-sm font-bold transition ${setObj.isDone ? 'bg-lime-400 text-black' : 'bg-[#1C1C1E] text-gray-300'}`}>{setObj.isDone ? '✓' : 'Mark'}</button> </div> {pred && !setObj.isDone && (<button onClick={()=>applyPrediction(exercise.id, setIndex, pred)} className="mt-2 text-[11px] px-2 py-1 rounded bg-[#141414] border border-lime-400/30 text-lime-300">🎯 Goal {pred.reps}r @ {pred.weight}lb • tap to fill</button>)} </div> ); }; return ( <div className="space-y-4 animate-fadeIn"> <header className="flex justify-between items-center"> <div> <p className="text-sm text-gray-400">{currentDate.toLocaleDateString('en-US', { weekday: 'long' })}</p> <h2 className="text-3xl font-bold uppercase tracking-wide">{localLog.name}</h2> </div> <button onClick={() => setShowProgramSelector(true)} className="text-xs px-3 py-1 rounded-md bg-gray-700 text-gray-300">Change</button> </header> <WarmupCard /> {localLog.exercises.map(exercise => ( <div key={exercise.id} className={`${cardColor} p-4 rounded-2xl`}> <h4 className="font-bold">{exercise.name}</h4><p className="text-xs text-gray-400 capitalize">{exercise.primary}</p> <div className="mt-3">{exercise.setsData.map((set, i) => <SetRowPro key={i} exercise={exercise} setObj={set} setIndex={i} prevLog={prevLogData} />)}</div> </div> ))} </div> ); };
+        const ProgressDashboard = ({kpis, volumeData, recoveryChartData, cardioData, cardColor }) => { const latest = volumeData.at(-1)?.Volume||0; const prev = volumeData.at(-2)?.Volume||0; const delta = latest && prev ? ((latest - prev)/Math.max(1,prev))*100 : 0; const pieData = [{name: 'Low Intensity', value: cardioData.low}, {name: 'High Intensity', value: cardioData.high}]; const COLORS = ['#bef264', '#f59e0b']; return ( <div className="space-y-6 animate-fadeIn"> <header><h2 className="text-3xl font-bold uppercase tracking-wide">Statistics</h2></header> <div className="grid grid-cols-2 gap-4"> <div className={`${cardColor} p-4 rounded-2xl`}><p className="text-sm text-gray-400">Weekly Volume</p><div className="flex items-end gap-2"><p className="text-2xl font-bold text-lime-400">{(latest/1000).toFixed(1)}K</p><span className={`text-xs font-semibold ${delta>=0?'text-lime-300':'text-rose-300'}`}>{delta>=0?'+':''}{delta.toFixed(1)}%</span></div></div> <div className={`${cardColor} p-4 rounded-2xl`}><p className="text-sm text-gray-400">Avg. Consistency</p><p className="text-2xl font-bold text-lime-400">{kpis.consistencyScore}%</p></div> </div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold mb-2">Weekly Volume Trend</h3> <div style={{ width: '100%', height: 150 }}> <ResponsiveContainer width="100%" height="100%"> <AreaChart data={volumeData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}> <defs><linearGradient id="colorVolume" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#BEF264" stopOpacity={0.8}/><stop offset="95%" stopColor="#BEF264" stopOpacity={0.1}/></linearGradient></defs> <CartesianGrid stroke="#374151" strokeDasharray="3 3" /><XAxis dataKey="name" stroke="#9ca3af" tick={{ fontSize: 10 }} /><YAxis stroke="#9ca3af" tick={{ fontSize: 10 }} domain={['auto', 'auto']} /> <Tooltip contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }} itemStyle={{ color: '#bef264' }}/> <Area type="monotone" dataKey="Volume" stroke="#BEF264" fillOpacity={1} fill="url(#colorVolume)" /> </AreaChart> </ResponsiveContainer> </div> </div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold mb-2">Cardio Balance (80/20 Rule)</h3> <div style={{ width: '100%', height: 150 }}> <ResponsiveContainer><PieChart><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}/><Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={60} label>{pieData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}</Pie><Legend wrapperStyle={{fontSize: "12px"}}/></PieChart></ResponsiveContainer></div></div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold mb-2">Recovery vs Soreness</h3> <div style={{ width: '100%', height: 150 }}> <ResponsiveContainer width="100%" height="100%"> <LineChart data={recoveryChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}> <CartesianGrid stroke="#374151" strokeDasharray="3 3" /><XAxis dataKey="name" stroke="#9ca3af" tick={{ fontSize: 10 }} /> <YAxis yAxisId="left" stroke="#9ca3af" domain={[0, 10]} tick={{ fontSize: 10 }} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}/> <Legend wrapperStyle={{fontSize: "12px"}} /><Line yAxisId="left" type="monotone" dataKey="Wellness" stroke="#BEF264" strokeWidth={2} name="Wellness" /><Line yAxisId="left" type="monotone" dataKey="Soreness" stroke="#f59e0b" strokeWidth={2} name="Soreness" /> </LineChart> </ResponsiveContainer> </div> </div> </div> ) };
+        const NutritionTracker = ({ cardColor, nutritionLogs, saveNutritionLog, deleteFoodItem, currentDate }) => { const [mealType, setMealType] = useState('breakfast'); const [foodName, setFoodName] = useState(''); const [protein, setProtein] = useState(''); const [carbs, setCarbs] = useState(''); const [fats, setFats] = useState(''); const dateString = formatDate(currentDate); const todaysLog = nutritionLogs[dateString] || {}; const handleAddFood = () => { if (!foodName || !protein || !carbs || !fats) return; const newFood = { id: crypto.randomUUID(), name: foodName, protein: Number(protein), carbs: Number(carbs), fats: Number(fats) }; const updatedMeal = [...(todaysLog[mealType] || []), newFood]; saveNutritionLog(dateString, { ...todaysLog, [mealType]: updatedMeal }); setFoodName(''); setProtein(''); setCarbs(''); setFats(''); }; const totals = useMemo(() => { let p=0, c=0, f=0; Object.values(todaysLog).forEach(meal => { if(Array.isArray(meal)) meal.forEach(item => { p+=item.protein; c+=item.carbs; f+=item.fats; }); }); return { p, c, f, calories: p*4 + c*4 + f*9 }; }, [todaysLog]); return ( <div className="space-y-6 animate-fadeIn"> <header><h2 className="text-3xl font-bold uppercase tracking-wide">Nutrition Tracker</h2></header> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Daily Totals</h3> <div className="grid grid-cols-4 gap-2 text-center mt-2"> <div className="bg-[#101010] p-2 rounded-lg"><p className="text-xs text-gray-400">Calories</p><p className="font-bold text-lime-400">{totals.calories}</p></div> <div className="bg-[#101010] p-2 rounded-lg"><p className="text-xs text-gray-400">Protein</p><p className="font-bold">{totals.p}g</p></div> <div className="bg-[#101010] p-2 rounded-lg"><p className="text-xs text-gray-400">Carbs</p><p className="font-bold">{totals.c}g</p></div> <div className="bg-[#101010] p-2 rounded-lg"><p className="text-xs text-gray-400">Fats</p><p className="font-bold">{totals.f}g</p></div> </div> </div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Log Food</h3> <div className="space-y-3 mt-3"> <select value={mealType} onChange={e => setMealType(e.target.value)} className="w-full p-2 bg-[#101010] rounded-md"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option><option value="dinner">Dinner</option><option value="snacks">Snacks</option></select> <input type="text" value={foodName} onChange={e => setFoodName(e.target.value)} placeholder="Food Name" className="w-full p-2 bg-[#101010] rounded-md"/> <div className="grid grid-cols-3 gap-2"> <input type="number" value={protein} onChange={e => setProtein(e.target.value)} placeholder="Protein (g)" className="w-full p-2 bg-[#101010] rounded-md"/> <input type="number" value={carbs} onChange={e => setCarbs(e.target.value)} placeholder="Carbs (g)" className="w-full p-2 bg-[#101010] rounded-md"/> <input type="number" value={fats} onChange={e => setFats(e.target.value)} placeholder="Fats (g)" className="w-full p-2 bg-[#101010] rounded-md"/> </div> <button onClick={handleAddFood} className="w-full py-3 font-bold text-black bg-lime-400 rounded-lg">Add Food</button> </div> </div> {['breakfast', 'lunch', 'dinner', 'snacks'].map(meal => ( <div key={meal} className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold capitalize">{meal}</h3> <ul className="mt-2 space-y-2">{todaysLog[meal]?.map(food => ( <li key={food.id} className="flex justify-between items-center bg-[#101010] p-2 rounded-md text-sm"> <span>{food.name}</span> <div className="flex items-center gap-3"> <span>P:{food.protein} C:{food.carbs} F:{food.fats}</span> <button onClick={() => deleteFoodItem(dateString, meal, food.id)} className="text-red-500 font-bold">&times;</button> </div> </li> ))}</ul></div>))} </div> ); };
+        const BJJJournal = ({ cardColor, notes, saveNote, deleteNote }) => { const [category, setCategory] = useState('Technique'); const [content, setContent] = useState(''); const handleSave = () => { if (!content) return; saveNote({ category, content }); setContent(''); }; return( <div className="space-y-6 animate-fadeIn"> <header><h2 className="text-3xl font-bold uppercase tracking-wide">BJJ Journal</h2></header> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">New Entry</h3> <div className="space-y-3 mt-3"> <select value={category} onChange={e => setCategory(e.target.value)} className="w-full p-2 bg-[#101010] rounded-md"><option>Technique</option><option>Sparring</option><option>Concepts</option></select> <textarea value={content} onChange={e => setContent(e.target.value)} placeholder="What did you learn today?" className="w-full p-2 bg-[#101010] rounded-md h-24"></textarea> <button onClick={handleSave} className="w-full py-3 font-bold text-black bg-lime-400 rounded-lg">Save Note</button> </div> </div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Recent Notes</h3> <ul className="mt-2 space-y-2">{notes.map(note => ( <li key={note.id} className="bg-[#101010] p-3 rounded-md"> <div className="flex justify-between items-start"><div><span className={`text-xs font-bold px-2 py-1 rounded-full ${note.category === 'Technique' ? 'bg-blue-900 text-blue-300' : note.category === 'Sparring' ? 'bg-red-900 text-red-300' : 'bg-green-900 text-green-300'}`}>{note.category}</span><p className="text-sm mt-2">{note.content}</p></div><button onClick={() => deleteNote(note.id)} className="text-red-500 font-bold text-xl">&times;</button></div></li>))}</ul></div> <div className={`${cardColor} p-4 rounded-2xl`}> <h3 className="text-lg font-bold">Technique Library</h3> <div className="flex flex-wrap gap-2 mt-2">{BJJ_TECHNIQUES.map(tech => (<div key={tech.id} className="bg-[#101010] px-3 py-1 rounded-full text-sm">{tech.name}</div>))}</div></div></div>); };
+        
+        const App = () => {
+            const { db, userId, isAuthReady } = useFirebase();
+            const { logs, saveLog } = useWorkoutLogs(db, userId, isAuthReady);
+            const { recoveryLogs, saveRecoveryData, recoveryChartData } = useRecoveryLogs(db, userId, isAuthReady);
+            const { cardioLogs, saveLog: saveCardioLog } = useCardioLogs(db, userId, isAuthReady);
+            const { nutritionLogs, saveNutritionLog, deleteFoodItem } = useNutritionLogs(db, userId, isAuthReady);
+            const { notes, saveNote, deleteNote } = useBjjNotes(db, userId, isAuthReady);
+            const { kpis, volumeData, cardioData } = useKPIs(logs, cardioLogs);
+            const [currentDate, setCurrentDate] = useState(new Date());
+            const [activeTab, setActiveTab] = useState('home');
+            const [hasStarted, setHasStarted] = useState(false);
+            const [activePlanId, setActivePlanId] = useState('metabolic-hypertrophy');
+            const [localLog, setLocalLog] = useState(null);
+            const [prevLogData, setPrevLogData] = useState(null);
+            const [toasts, setToasts] = useState([]);
+            const [timerPill, setTimerPill] = useState({ show:false, endsAt:0, intervalId: null });
+            
+            useEffect(() => {
+                const onToast = (e) => { const id = crypto.randomUUID(); setToasts(t => [...t, { id, ...e.detail }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 1800); };
+                const onStartTimer = (e) => {
+                    const secs = e.detail?.seconds ?? 90;
+                    setTimerPill(p => {
+                        if (p.intervalId) clearInterval(p.intervalId);
+                        const newPill = { show: true, endsAt: Date.now() + secs * 1000 };
+                        const intervalId = setInterval(() => {
+                            if (Date.now() >= newPill.endsAt) { setTimerPill({ show: false, endsAt: 0, intervalId: null }); clearInterval(intervalId); }
+                            else { setTimerPill(current => ({...current})); }
+                        }, 1000);
+                        return {...newPill, intervalId};
+                    });
+                };
+                window.addEventListener('toast', onToast);
+                window.addEventListener('startRestTimer', onStartTimer);
+                return () => { window.removeEventListener('toast', onToast); window.removeEventListener('startRestTimer', onStartTimer); if(timerPill.intervalId) clearInterval(timerPill.intervalId); };
+            }, []);
+
+            const dateString = formatDate(currentDate);
+            const workoutLogData = logs[dateString] || null;
+            const recoveryData = recoveryLogs[dateString] || {};
+            const currentWorkout = useMemo(() => getWorkoutForDate(currentDate, logs, activePlanId), [currentDate, logs, activePlanId]);
+
+            useEffect(() => {
+                if (currentWorkout) {
+                    let lastLog = null;
+                    const sortedDates = Object.keys(logs).filter(date => logs[date].isComplete && logs[date].planId === activePlanId).sort((a,b) => new Date(b) - new Date(a));
+                    for (const date of sortedDates) { if (logs[date]?.name === currentWorkout.name) { lastLog = logs[date]; break; } }
+                    setPrevLogData(lastLog);
+                    const initialLog = workoutLogData && workoutLogData.name === currentWorkout.name ? { ...workoutLogData, planId: activePlanId } : {
+                        id: currentWorkout.id, name: currentWorkout.name, isComplete: false, planId: activePlanId,
+                        exercises: currentWorkout.exercises.map(ex => ({ ...ex, setsData: Array(ex.sets).fill().map((_, i) => ({ set: i + 1, weight: '', reps: '', isDone: false })) }))
+                    };
+                    setLocalLog(initialLog);
+                } else { setLocalLog(null); setPrevLogData(null); }
+            }, [currentWorkout, workoutLogData, activePlanId]);
+
+            const handleSetChange = useCallback((exId, setIndex, field, value) => {
+                setLocalLog(prevLog => {
+                    if (!prevLog) return prevLog;
+                    const updatedExercises = prevLog.exercises.map(ex => {
+                        if (ex.id === exId) {
+                            const updatedSetsData = ex.setsData.map((set, index) => {
+                                if (index === setIndex) return { ...set, [field]: value };
+                                return set;
+                            });
+                            return { ...ex, setsData: updatedSetsData };
+                        }
+                        return ex;
+                    });
+                    const allSetsDone = updatedExercises.every(ex => ex.setsData.every(set => set.isDone));
+                    return { ...prevLog, exercises: updatedExercises, isComplete: allSetsDone };
+                });
+            }, []);
+            useEffect(() => { if (localLog && db && userId && isAuthReady) saveLog(dateString, localLog); }, [localLog, dateString]);
+
+            if (!isAuthReady) return <div className="min-h-screen bg-[#101010] flex items-center justify-center text-white">Loading Auth...</div>;
+            if (!hasStarted) return <SplashScreen onStart={() => setHasStarted(true)} />;
+
+            const cardColor = "bg-[#1C1C1E]";
+            const remaining = Math.max(0, timerPill.endsAt - Date.now());
+            const mm = String(Math.floor(remaining/60000)).padStart(2,'0');
+            const ss = String(Math.floor((remaining%60000)/1000)).padStart(2,'0');
+
+            const renderContent = () => {
+                switch (activeTab) {
+                    case 'home': return <HomeDashboard {...{ localLog, currentDate, kpis, cardColor, recoveryData, saveRecoveryData, setActiveTab, setCurrentDate }} />;
+                    case 'training': return <TrainingProgram {...{ localLog, prevLogData, currentDate, handleSetChange, cardColor, activePlanId, setActivePlanId, saveCardioLog }} />;
+                    case 'progress': return <ProgressDashboard {...{ kpis, volumeData, recoveryChartData, cardioData, cardColor }} />;
+                    case 'nutrition': return <NutritionTracker {...{ cardColor, nutritionLogs, saveNutritionLog, deleteFoodItem, currentDate }} />;
+                    case 'bjj': return <BJJJournal {...{ cardColor, notes, saveNote, deleteNote }} />;
+                    default: return <div />;
+                }
+            };
+
+            return (
+                 <div className="min-h-screen bg-[#101010] text-gray-100 font-sans">
+                    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 space-y-2 w-full max-w-md px-4">{toasts.map(t=>(<div key={t.id} className={`animate-toastIn px-4 py-2 rounded-xl text-sm shadow ${t.type==='success' ? 'bg-[#192418] text-lime-300 border border-lime-500/20' : 'bg-[#1C1C1E] text-gray-200 border border-gray-700'}`}>{t.text}</div>))}</div>
+                    {timerPill.show && (<button onClick={()=>setTimerPill({show:false, endsAt:0, intervalId: clearInterval(timerPill.intervalId)})} className="fixed bottom-24 right-4 z-40 px-4 py-2 rounded-full bg-lime-400 text-black font-bold shadow-lg active:scale-95 animate-fadeIn">{mm}:{ss} • Rest</button>)}
+                    <div className="max-w-md mx-auto p-4 pb-24">{renderContent()}</div>
+                    <nav className="fixed bottom-0 left-0 right-0 bg-[#1C1C1E] border-t border-gray-800">
+                        <div className="max-w-md mx-auto flex justify-around">
+                            {[ { id: 'home', label: 'Home', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg> }, { id: 'training', label: 'Workout', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 2a1 1 0 00-1 1v1H3a1 1 0 00-1 1v10a1 1 0 001 1h14a1 1 0 001-1V5a1 1 0 00-1-1h-1V3a1 1 0 00-1-1H5zM4 6h12v9H4V6z" clipRule="evenodd" /><path d="M8 8a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" /></svg> }, { id: 'progress', label: 'Stats', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M18 10a8 8 0 10-16 0 8 8 0 0016 0z" /></svg> }, { id: 'nutrition', label: 'Diet', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor"><path d="M2 4a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H3a1 1 0 01-1-1V4zM8 4a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H9a1 1 0 01-1-1V4zM14 4a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1h-2a1 1 0 01-1-1V4zM2 9a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H3a1 1 0 01-1-1V9zM8 9a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H9a1 1 0 01-1-1V9zM14 9a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1h-2a1 1 0 01-1-1V9zM2 14a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H3a1 1 0 01-1-1v-1zM8 14a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1H9a1 1 0 01-1-1v-1zM14 14a1 1 0 011-1h2a1 1 0 011 1v1a1 1 0 01-1 1h-2a1 1 0 01-1-1v-1z" /></svg> }, { id: 'bjj', label: 'BJJ', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" /></svg> } ].map(item => ( <button key={item.id} onClick={() => setActiveTab(item.id)} className={`flex flex-col items-center justify-center pt-2 pb-1 text-xs font-medium transition-colors duration-300 w-1/5 ${activeTab === item.id ? 'text-lime-400' : 'text-gray-500 hover:text-gray-300'}`}> {item.icon} <span className="mt-1">{item.label}</span> </button> ))}
+                        </div>
+                    </nav>
+                </div>
+            );
+        };
+        
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    })();
+    </script>
+</body>
+</html>
+
